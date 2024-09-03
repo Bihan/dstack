@@ -1,0 +1,19 @@
+type: task
+
+
+image: runpod/pytorch:2.4.0-py3.10-rocm6.1.0-ubuntu22.04
+env:
+  - HUGGING_FACE_HUB_TOKEN
+  - MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+commands:
+  - wget https://github.com/ROCm/hipBLAS/archive/refs/tags/rocm-6.1.0.zip
+  - unzip rocm-6.1.0.zip
+  -
+  - git clone https://github.com/vllm-project/vllm.git
+  - cd vllm
+  - vllm serve $MODEL_ID --port 8000
+ports:
+  - 8000
+
+resources:
+  gpu: 24GB

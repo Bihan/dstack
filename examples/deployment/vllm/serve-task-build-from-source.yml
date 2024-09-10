@@ -24,7 +24,9 @@ init:
   - wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P /opt/rocm/lib
   - rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so*
   - export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-  - python3 setup.py develop
+  - wget https://dstackcatalog.s3.ap-south-1.amazonaws.com/wheels/vllm-0.6.0%2Brocm614-cp310-cp310-linux_x86_64.whl
+  - pip install vllm-0.6.0+rocm614-cp310-cp310-linux_x86_64.whl
+#  - python3 setup.py develop
   - vllm serve $MODEL_ID --port 8000
 
 ide: vscode

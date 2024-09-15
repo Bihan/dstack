@@ -1,0 +1,31 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: trl-amd-vscode
+
+# If `image` is not specified, dstack uses its default image
+image: runpod/pytorch:2.1.2-py3.10-rocm6.1-ubuntu22.04
+
+# Required environment variables
+env:
+  - HUGGING_FACE_HUB_TOKEN
+# Uncomment if you want the environment to be pre-installed
+init:
+  - export PATH=/opt/conda/envs/py_3.10/bin:$PATH
+  - git clone https://github.com/ROCm/bitsandbytes
+  - cd bitsandbytes
+  - git checkout rocm_enabled
+  - pip install -r requirements-dev.txt
+  - cmake -DBNB_ROCM_ARCH="gfx942" -DCOMPUTE_BACKEND=hip -S  .  # Use  to target specific gpu arch
+  - make
+  - pip install .
+  - pip install trl
+  - pip install peft
+  - pip install transformers datasets huggingface-hub scipy
+
+ide: vscode
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+resources:
+  gpu: MI300X

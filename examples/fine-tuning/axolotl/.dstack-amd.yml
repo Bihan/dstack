@@ -1,0 +1,39 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: axolotl-amd-vscode
+
+# Using the official Axolotl's Docker image
+image: runpod/pytorch:2.4.0-py3.10-rocm6.1.0-ubuntu22.04
+
+# Required environment variables
+env:
+  - HUGGING_FACE_HUB_TOKEN
+
+init:
+  - export PATH=/opt/conda/envs/py_3.10/bin:$PATH
+  - pip uninstall torch torchvision torchaudio -y
+  - pip install --no-cache-dir --pre torch==2.5.0.dev20240726 torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm6.1
+  - wget https://dstackcatalog.s3.ap-south-1.amazonaws.com/wheels/flash_attn-2.6.3-cp310-cp310-linux_x86_64.whl
+  - pip install flash_attn-2.6.3-cp310-cp310-linux_x86_64.whl
+  - pip install /opt/rocm/share/amd_smi
+  - git clone https://github.com/ROCm/bitsandbytes
+  - cd bitsandbytes
+  - git checkout rocm_enabled
+  - pip install -r requirements-dev.txt
+  - cmake -DBNB_ROCM_ARCH="gfx942" -DCOMPUTE_BACKEND=hip -S  .  # Use  to target specific gpu arch
+  - make
+  - pip install .
+  - cd ..
+  - git clone https://github.com/Bihan/axolotl.git
+  - cd axolotl
+  - pip install -e .
+#  - accelerate launch scripts/finetune.py examples/openllama-3b/lora.yml
+#  - accelerate launch scripts/finetune.py examples/llama-3/lora-8b.yml
+
+ide: vscode
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+resources:
+  gpu: MI300X

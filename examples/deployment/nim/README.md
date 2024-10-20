@@ -1,5 +1,18 @@
 # NIM
-This example shows how to deploy `Meta/LLama3-8b-instruct` with [NIM :material-arrow-top-right-thin:{ .external }](https://docs.nvidia.com/nim/large-language-models/latest/getting-started.html) on dstack.
+This example shows how to deploy `Meta/LLama3-8b-instruct` with `dstack` using [NIM :material-arrow-top-right-thin:{ .external }](https://docs.nvidia.com/nim/large-language-models/latest/getting-started.html).
+
+??? info "Prerequisites"
+    Once `dstack` is [installed](https://dstack.ai/docs/installation), go ahead clone the repo, and run `dstack init`.
+
+    <div class="termy">
+ 
+    ```shell
+    $ git clone https://github.com/dstackai/dstack
+    $ cd dstack
+    $ dstack init
+    ```
+ 
+    </div>
 
 ## Deployment
 

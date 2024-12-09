@@ -62,6 +62,7 @@ class TestListBackendTypes:
             "runpod",
             "tensordock",
             "vastai",
+            "vultr",
         ]
 
 

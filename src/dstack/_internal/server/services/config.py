@@ -23,6 +23,7 @@ from dstack._internal.core.models.backends.oci import AnyOCICreds
 from dstack._internal.core.models.backends.runpod import AnyRunpodCreds
 from dstack._internal.core.models.backends.tensordock import AnyTensorDockCreds
 from dstack._internal.core.models.backends.vastai import AnyVastAICreds
+from dstack._internal.core.models.backends.vultr import AnyVultrCreds
 from dstack._internal.core.models.common import CoreModel
 from dstack._internal.server import settings
 from dstack._internal.server.models import ProjectModel, UserModel
@@ -428,6 +429,13 @@ class VastAIConfig(CoreModel):
     creds: Annotated[AnyVastAICreds, Field(description="The credentials")]
 
 
+class VultrConfig(CoreModel):
+    type: Annotated[Literal["vultr"], Field(description="The type of backend")] = "vultr"
+    regions: Optional[List[str]] = None
+    project_id: Annotated[str, Field(description="The project ID")]
+    creds: Annotated[AnyVultrCreds, Field(description="The credentials")]
+
+
 class DstackConfig(CoreModel):
     type: Annotated[Literal["dstack"], Field(description="The type of backend")] = "dstack"
 
@@ -445,6 +453,7 @@ AnyBackendConfig = Union[
     RunpodConfig,
     TensorDockConfig,
     VastAIConfig,
+    VultrConfig,
     DstackConfig,
 ]
 
@@ -468,6 +477,7 @@ AnyBackendAPIConfig = Union[
     RunpodConfig,
     TensorDockConfig,
     VastAIConfig,
+    VultrConfig,
     DstackConfig,
 ]
 

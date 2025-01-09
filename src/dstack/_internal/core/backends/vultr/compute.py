@@ -6,7 +6,7 @@ import requests
 from dstack._internal.core.backends.base import Compute
 from dstack._internal.core.backends.base.compute import (
     get_instance_name,
-    get_shim_commands,
+    get_user_data,
 )
 from dstack._internal.core.backends.base.offers import get_catalog_offers
 from dstack._internal.core.backends.vultr.api_client import VultrApiClient
@@ -69,15 +69,11 @@ class VultrCompute(Compute):
     def create_instance(
         self, instance_offer: InstanceOfferWithAvailability, instance_config: InstanceConfiguration
     ) -> JobProvisioningData:
-        public_keys = instance_config.get_public_keys()
-        commands = get_shim_commands(authorized_keys=public_keys)
-        shim_commands = "#!/bin/sh\n" + " ".join([" && ".join(commands)])
         instance_id = self.api_client.launch_instance(
             region=instance_offer.region,
             label=instance_config.instance_name,
             plan=instance_offer.instance.name,
-            startup_script=shim_commands,
-            public_keys=public_keys,
+            user_data=get_user_data(authorized_keys=instance_config.get_public_keys()),
         )
 
         launched_instance = JobProvisioningData(

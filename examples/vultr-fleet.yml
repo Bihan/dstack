@@ -1,0 +1,7 @@
+type: fleet
+name: vultr-fleet
+nodes: 2
+placement: cluster
+backends: [vultr]
+resources:
+  cpu: 2

@@ -70,11 +70,18 @@ class VultrCompute(Compute):
     def create_instance(
         self, instance_offer: InstanceOfferWithAvailability, instance_config: InstanceConfiguration
     ) -> JobProvisioningData:
+        # create vpc
+        # todo only retrive dstack-vpc
+        vpc_id = self.api_client.get_vpc_for_region(instance_offer.region)
+        if not vpc_id:
+            vpc_id = self.api_client.create_vpc(instance_offer.region)
+
         instance_id = self.api_client.launch_instance(
             region=instance_offer.region,
             label=instance_config.instance_name,
             plan=instance_offer.instance.name,
             user_data=get_user_data(authorized_keys=instance_config.get_public_keys()),
+            vpc_id=vpc_id,
         )
 
         launched_instance = JobProvisioningData(

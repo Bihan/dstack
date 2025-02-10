@@ -4,7 +4,7 @@ name: trl-train
 
 python: "3.10"
 
-nvcc: true
+# nvcc: true
 # Required environment variables
 env:
   - WANDB_API_KEY
@@ -13,7 +13,7 @@ env:
 # Commands of the task
 commands:
   - git clone https://github.com/huggingface/trl.git
-  - pip install transformers
+  # - pip install transformers
   - pip install trl
   - pip install peft
   - pip install wandb

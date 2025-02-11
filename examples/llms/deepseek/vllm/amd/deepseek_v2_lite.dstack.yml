@@ -4,10 +4,8 @@ name: deepseek-v2-lite-amd
 image: rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
 env:
   - MODEL_ID=deepseek-ai/DeepSeek-V2-Lite
-  - MAX_MODEL_LEN=126432
 commands:
   - vllm serve $MODEL_ID
-    --max-model-len $MAX_MODEL_LEN
     --trust-remote-code
 
 port: 8000

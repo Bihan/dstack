@@ -8,7 +8,7 @@ env:
 commands:
   - vllm serve $MODEL_ID
     --max-model-len $MAX_MODEL_LEN
-
+    --trust-remote-code
 port: 8000
 
 model: deepseek-ai/DeepSeek-R1-Distill-Llama-70B

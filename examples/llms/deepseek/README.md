@@ -1,7 +1,7 @@
 # Deepseek
-This example walks you through how to deploy and train Deepseek models with `dstack`. Here we have used Deepseek-r1 distilled models as well as Deepseek-V2-Lite, a 16B model that resembles the architecture of Deepseek-r1 (671B). 
+This example walks you through how to deploy and train Deepseek models with `dstack`. Here we have used Deepseek-R1 distilled models as well as Deepseek-V2-Lite, a 16B model that resembles the architecture of Deepseek-R1 (671B). 
 
-Deepseek-V2-Lite uses the same MLA(Multi-head Latent Attention) and DeepSeekMoE (Mixture-of-Experts) as Deepseek-r1, but requires less memory which is ideal for testing inference and fine-tuning on smaller GPUs.
+Deepseek-V2-Lite uses the same MLA(Multi-head Latent Attention) and DeepSeekMoE (Mixture-of-Experts) as Deepseek-R1, but requires less memory which is ideal for testing inference and fine-tuning on smaller GPUs.
 
 ??? info "Prerequisites"
     Once `dstack` is [installed](https://dstack.ai/docs/installation), go ahead clone the repo, and run `dstack init`.
@@ -17,7 +17,7 @@ Deepseek-V2-Lite uses the same MLA(Multi-head Latent Attention) and DeepSeekMoE 
 
 ## Deployment
 ### AMD
-Here's an example of a service that deploys Deepseek-r1 using `SGLang` and `vLLM` with AMD `Mi300x` GPU. The below configurations also support Deepseek-V2-Lite.
+Here's an example of a service that deploys Deepseek-R1-Distill-Llama-70B using `SGLang` and `vLLM` with AMD `Mi300x` GPU. The below configurations also support Deepseek-V2-Lite.
 
 === "SGLang"
 
@@ -73,9 +73,86 @@ Here's an example of a service that deploys Deepseek-r1 using `SGLang` and `vLLM
 
 Note, when using Deepseek-70B with vLLM with a 192GB GPU, we must limit the context size to 126432 tokens to fit the memory.
 
+### INTEL
+Here's an example of a service that deploys Deepseek-R1-Distill-Llama-70B using `TGI` and `vLLM` with Intel Gaudi2 GPUs. Both TGI and vLLM does not support Deepseek-V2-Lite.
+
+=== "TGI"
+
+    <div editor-title="examples/llms/deepseek/tgi/intel/.dstack.yml">
+    ```yaml
+    type: service
+
+    name: tgi
+
+    image: ghcr.io/huggingface/tgi-gaudi:2.3.1
+
+    auth: false
+    port: 8000
+
+    model: DeepSeek-R1-Distill-Llama-70B
+
+    env:
+      - HF_TOKEN
+      - MODEL_ID=deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+      - PORT=8000
+      - OMPI_MCA_btl_vader_single_copy_mechanism=none
+      - TEXT_GENERATION_SERVER_IGNORE_EOS_TOKEN=true
+      - PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+      - MAX_TOTAL_TOKENS=2048
+      - BATCH_BUCKET_SIZE=256
+      - PREFILL_BATCH_BUCKET_SIZE=4
+      - PAD_SEQUENCE_TO_MULTIPLE_OF=64
+      - ENABLE_HPU_GRAPH=true
+      - LIMIT_HPU_GRAPH=true
+      - USE_FLASH_ATTENTION=true
+      - FLASH_ATTENTION_RECOMPUTE=true
+
+    commands:
+      - text-generation-launcher
+          --sharded true
+          --num-shard 8
+          --max-input-length 1024
+          --max-total-tokens 2048
+          --max-batch-prefill-tokens 4096
+          --max-batch-total-tokens 524288
+          --max-waiting-tokens 7
+          --waiting-served-ratio 1.2
+          --max-concurrent-requests 512
+
+    resources:
+      gpu: Gaudi2:8
+    ```
+    </div>
+
+=== "vLLM"
+
+    <div editor-title="examples/llms/deepseek/vllm/intel/.dstack.yml">
+    ```yaml
+    type: service
+    name: deepseek-r1-gaudi
+
+    image: vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0
+    env:
+      - MODEL_ID=deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+    commands:
+      - git clone https://github.com/vllm-project/vllm.git
+      - cd vllm
+      - pip install -r requirements-hpu.txt
+      - python setup.py develop
+      - vllm serve $MODEL_ID
+        --tensor-parallel-size 8
+
+    port: 8000
+
+    model: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+
+    resources:
+        gpu: gaudi2:8
+    ```
+    </div>  
 
 ### NVIDIA
-Here's an example of a service that deploys Deepseek-r1 using `SGLang` and `vLLM` with NVIDIA GPUs. To run Deepseek-V2-Lite with vLLM, we must use 40GB GPU and limit the context size to 4096 tokens. Similarly, to run Deepseek-V2-Lite with SGLang, we must use 80GB GPU as per this [issue](https://github.com/sgl-project/sglang/issues/3451).
+Here's an example of a service that deploys Deepseek-R1-Distill-Llama-8B using `SGLang` and `vLLM` with NVIDIA GPUs. To run Deepseek-V2-Lite with vLLM, we must use 40GB GPU and limit the context size to 4096 tokens. Similarly, to run Deepseek-V2-Lite with SGLang, we must use 80GB GPU as per this [issue](https://github.com/sgl-project/sglang/issues/3451).
 
 === "SGLang"
 
@@ -135,7 +212,7 @@ This excludes memory for the model context and CUDA/ROCm kernel reservations.
 
 | Model Name               | Model size | FP16    | FP8     | INT4    |
 |--------------------------|------------|---------|---------|---------|
-| Deepseek-r1              | **671B**   | ~1342GB | ~671GB  | ~336GB  |
+| Deepseek-R1              | **671B**   | ~1342GB | ~671GB  | ~336GB  |
 | DeepSeek-R1-Distill-Llama| **70B**    | ~161GB  | ~80.5GB | ~40B    |
 | DeepSeek-R1-Distill-Qwen | **32B**    | ~74GB   | ~37GB   | ~18.5GB |
 | DeepSeek-V2-Lite         | **16B**    | ~35GB   | ~17.5GB | ~8.75GB |
@@ -144,7 +221,7 @@ This excludes memory for the model context and CUDA/ROCm kernel reservations.
 | DeepSeek-R1-Distill-Qwen | **7B**     | ~16GB   | ~8GB    | ~4GB    |
 | DeepSeek-R1-Distill-Qwen | **1.5B**   | ~3.5GB  | ~2GB    | ~1GB    |
  
-For example, the FP8 version of Deepseek-r1 671B fits into single node of `Mi300x` with eight 192GB GPUs or 
+For example, the FP8 version of Deepseek-R1 671B fits into single node of `Mi300x` with eight 192GB GPUs or 
 singe node of `H200` with eight 141GB GPUs.
 
 
@@ -291,6 +368,63 @@ Here are examples of LoRA and GRPO fine-tuning of DeepSeek-R1-Distill-Qwen-1.5B 
     ```
     </div>
 
+### INTEL
+Here is an example of LoRA fine-tuning of DeepSeek-R1-Distill-Qwen-7B on Intel Gaudi2 GPUs.
+
+=== "LoRA"
+
+    <div editor-title="examples/llms/deepseek/trl/intel/.dstack.yml">
+    ```yaml
+    type: task
+    # The name is optional, if not specified, generated randomly
+    name: trl-train
+
+    image: vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0
+
+    # Required environment variables
+    env:
+      - MODEL_ID=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      - WANDB_API_KEY
+      - WANDB_PROJECT
+    # Commands of the task
+    commands:
+      - pip install --upgrade-strategy eager optimum[habana]
+      - pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.19.0
+      - git clone https://github.com/huggingface/optimum-habana.git
+      - cd optimum-habana/examples/trl
+      - pip install -r requirements.txt
+      - pip install wandb
+      - DEEPSPEED_HPU_ZERO3_SYNC_MARK_STEP_REQUIRED=1 python ../gaudi_spawn.py --world_size 8 --use_deepspeed sft.py
+        --model_name_or_path $MODEL_ID
+        --dataset_name "lvwerra/stack-exchange-paired"
+        --deepspeed ../language-modeling/llama2_ds_zero3_config.json
+        --output_dir="./sft"
+        --do_train
+        --max_steps=500
+        --logging_steps=10
+        --save_steps=100
+        --per_device_train_batch_size=1
+        --per_device_eval_batch_size=1
+        --gradient_accumulation_steps=2
+        --learning_rate=1e-4
+        --lr_scheduler_type="cosine"
+        --warmup_steps=100
+        --weight_decay=0.05
+        --optim="paged_adamw_32bit"
+        --lora_target_modules "q_proj" "v_proj"
+        --bf16
+        --remove_unused_columns=False
+        --run_name="sft_deepseek_70"
+        --report_to="wandb"
+        --use_habana
+        --use_lazy_mode
+
+    resources:
+      gpu: gaudi2:8
+
+    ```
+    </div>
+
 ### NVIDIA
 Here are examples of LoRA fine-tuning of DeepSeek-R1-Distill-Qwen-1.5B and QLoRA fine-tuning of DeepSeek-V2-Lite on NVIDIA GPU.
 
@@ -413,7 +547,7 @@ Here are examples of LoRA fine-tuning of DeepSeek-R1-Distill-Qwen-1.5B and QLoRA
 
 | Model Name               | Model size | Full fine-tuning | LoRA     | QLoRA    |
 |--------------------------|------------|------------------|----------|----------|
-|Deepseek-r1 (BF16)        | **671B**   | ~10.5TB          | ~1.4TB   | ~442GB   |
+|Deepseek-R1 (BF16)        | **671B**   | ~10.5TB          | ~1.4TB   | ~442GB   |
 |DeepSeek-R1-Distill-Llama | **70B**    | ~1.09TB          | ~151GB   | ~46GB    |
 |DeepSeek-R1-Distill-Qwen  | **32B**    | ~512GB           | ~70GB    | ~21GB    |
 |DeepSeek-V2-Lite          | **16B**    | ~256GB           | ~35GB    | ~11GB    |

@@ -1,0 +1,9 @@
+type: fleet
+name: h200-fleet
+
+ssh_config:
+  user: dstack
+  identity_file: ~/.ssh/id_rsa
+  hosts:
+    - hostname: 74.80.190.167
+      blocks: auto

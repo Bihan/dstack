@@ -1,0 +1,14 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: vscode
+
+# Uncomment to use a custom Docker image
+image: lmsysorg/sglang:dev
+
+ide: vscode
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+resources:
+  gpu: 8:H200

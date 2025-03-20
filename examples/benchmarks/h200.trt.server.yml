@@ -1,0 +1,95 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: h200-trt
+image: sjbbihan/tensorrt_llm:latest
+# image: tensorrt_llm/devel:latest
+#0.17.0.dev2024121700
+ide: vscode
+
+spot_policy: on-demand
+
+resources:
+  gpu: 8:H200
+  shm_size: 32GB
+  disk: 2000GB..
+
+# volumes:
+#   - /root/.cache:/root/.cache
+#git lfs install
+#git clone https://huggingface.co/deepseek-ai/DeepSeek-R1 deepseek
+
+# mpirun --allow-run-as-root -n 8 python3 run.py --engine_dir /root/.cache/ds-engine-8192   --max_output_len 40 --tokenizer_dir /root/.cache/DeepSeek-R1   --input_text "What is Deep Learning?"
+
+# pip install /root/.cache/trt-llm-build-for-deepseek/tensorrt_llm*.whl
+# git clone --branch v0.17.0 --depth 1 https://github.com/triton-inference-server/tensorrtllm_backend.git
+# FILL_TEMPLATE_SCRIPT=/workflow/tensorrtllm_backend/tools/fill_template.py
+# TRITON_MAX_BATCH_SIZE=256
+# TOKENIZER_DIR=/root/.cache/DeepSeek-R1
+# INSTANCE_COUNT=1
+# MAX_QUEUE_DELAY_MS=0
+# MAX_QUEUE_SIZE=0
+# DECOUPLED_MODE=true
+# ENGINE_DIR=/root/.cache/ds-engine-128000
+# MODEL_FOLDER=/root/.cache/triton-deepseek-128k
+#cp -r /workflow/tensorrtllm_backend/all_models/inflight_batcher_llm/* $MODEL_FOLDER/
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/ensemble/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},logits_datatype:TYPE_BF16
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/preprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},preprocessing_instance_count:${INSTANCE_COUNT}
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm/config.pbtxt triton_backend:tensorrtllm,triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},engine_dir:${ENGINE_DIR},max_queue_delay_microseconds:${MAX_QUEUE_DELAY_MS},batching_strategy:inflight_fused_batching,max_queue_size:${MAX_QUEUE_SIZE},encoder_input_features_data_type:TYPE_BF16,logits_datatype:TYPE_BF16
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/postprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},postprocessing_instance_count:${INSTANCE_COUNT},max_queue_size:${MAX_QUEUE_SIZE}
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm_bls/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},bls_instance_count:${INSTANCE_COUNT},logits_datatype:TYPE_BF16
+#python3 /workflow/tensorrtllm_backend/scripts/launch_triton_server.py --world_size=$DSTACK_GPUS_NUM --model_repo=${MODEL_FOLDER} --log-file "/workflow/triton_log.txt"
+
+#python3 /workflow/server/python/openai/openai_frontend/main.py --model-repository ${MODEL_FOLDER} --tokenizer deepseek-ai/DeepSeek-R1  --openai-port 8000
+
+
+trtllm-serve \
+  --backend pytorch \
+  --max_batch_size 512 \
+  --max_num_tokens 16384 \
+  --max_seq_len 16384 \
+  --tp_size 8 \
+  --ep_size 4 \
+  --pp_size 1 \
+  /root/.cache/deepseek
+
+# python3 bench_serving.py --backend vllm --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output 800 --max-concurrency 4 --output-file benchmark_results --model /root/.cache/deepseek
+# benchmark_args=Namespace(backend='vllm', base_url=None, host='0.0.0.0', port=None, dataset_name='random', dataset_path='', model=None, tokenizer=None, num_prompts=500, sharegpt_output_len=None, sharegpt_context_len=None, random_input_len=3200, random_output_len=800, random_range_ratio=1.0, request_rate=inf, max_concurrency=32, output_file=None, disable_tqdm=False, disable_stream=False, return_logprob=False, seed=1, disable_ignore_eos=False, extra_request_body=None, apply_chat_template=False, profile=False, lora_name=None, prompt_suffix='', pd_seperated=False, gsp_num_groups=64, gsp_prompts_per_group=16, gsp_system_prompt_len=2048, gsp_question_len=128, gsp_output_len=256)
+# Namespace(backend='vllm', base_url=None, host='0.0.0.0', port=8000, dataset_name='random', dataset_path='', model='deepseek', tokenizer=None, num_prompts=500, sharegpt_output_len=None, sharegpt_context_len=None, random_input_len=3200, random_output_len=800, random_range_ratio=1.0, request_rate=inf, max_concurrency=32, output_file=None, disable_tqdm=False, disable_stream=False, return_logprob=False, seed=1, disable_ignore_eos=False, extra_request_body=None, apply_chat_template=False, profile=False, lora_name=None, prompt_suffix='', pd_seperated=False, gsp_num_groups=64, gsp_prompts_per_group=16, gsp_system_prompt_len=2048, gsp_question_len=128, gsp_output_len=256)
+
+# #Input tokens: 1600000
+# #Output tokens: 400000
+# Starting initial single prompt test run...
+# Initial test run completed. Starting main benchmark run...
+# 100%|███████████████████████████████████████████████████████████████████████████| 500/500 [15:02<00:00,  1.81s/it]
+
+# ============ Serving Benchmark Result ============
+# Backend:                                 vllm      
+# Traffic request rate:                    inf       
+# Max reqeuest concurrency:                32        
+# Successful requests:                     500       
+# Benchmark duration (s):                  902.70    
+# Total input tokens:                      1600000   
+# Total generated tokens:                  400000    
+# Total generated tokens (retokenized):    398437    
+# Request throughput (req/s):              0.55      
+# Input token throughput (tok/s):          1772.47   
+# Output token throughput (tok/s):         443.12    
+# Total token throughput (tok/s):          2215.58   
+# Concurrency:                             31.39     
+# ----------------End-to-End Latency----------------
+# Mean E2E Latency (ms):                   56663.13  
+# Median E2E Latency (ms):                 56681.61  
+# ---------------Time to First Token----------------
+# Mean TTFT (ms):                          3480.56   
+# Median TTFT (ms):                        3602.42   
+# P99 TTFT (ms):                           9615.16   
+# ---------------Inter-Token Latency----------------
+# Mean ITL (ms):                           70.35     
+# Median ITL (ms):                         61.66     
+# P95 ITL (ms):                            119.65    
+# P99 ITL (ms):                            129.46    
+# Max ITL (ms):                            3622.30   
+# ==================================================
+
+#9b931c0f (HEAD -> main, origin/main, origin/HEAD) Update TensorRT-LLM (#2873)
+9b931c0f6305aefa3660e6fb84a76a42c0eef167

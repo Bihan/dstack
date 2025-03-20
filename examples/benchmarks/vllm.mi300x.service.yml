@@ -1,0 +1,21 @@
+type: service
+name: deepseek-r1-vllm
+
+image: rocm/vllm:rocm6.3.1_mi300_ubuntu22.04_py3.12_vllm_0.6.6
+env:
+  - MODEL_ID=deepseek-ai/DeepSeek-R1
+  - VLLM_FP8_PADDING=0
+  - VLLM_USE_TRITON_FLASH_ATTN=0
+commands:
+  - vllm serve $MODEL_ID --tensor-parallel-size 8 --trust-remote-code --max-model-len 32768 --host 0.0.0.0
+
+port: 8000
+
+model: deepseek-ai/DeepSeek-R1
+
+
+resources:
+  gpu: 8:mi300x
+
+volumes:
+  - /root/.cache/huggingface:/root/.cache/huggingface

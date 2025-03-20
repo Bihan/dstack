@@ -1,0 +1,146 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: trt-h200
+image: nvcr.io/nvidia/tritonserver:25.01-trtllm-python-py3
+# image: nvcr.io/nvidia/tritonserver:25.02-trtllm-python-py3
+
+ide: vscode
+
+spot_policy: on-demand
+
+resources:
+  gpu: 8:H200
+  shm_size: 32GB
+
+env:
+  - HF_TOKEN
+  - MODEL_REPO=https://huggingface.co/deepseek-ai/DeepSeek-R1
+  - MAX_SEQ_LEN=4096
+  - MAX_INPUT_LEN=2048
+  - MAX_BATCH_SIZE=4
+  - SCRIPT_DIR=/workflow/TensorRT-LLM/examples/deepseek_v3
+  - CHECK_POINT_DIR=/workflow/TensorRT-LLM/examples/deepseek_v3/ds-3.2-ckpt
+  - ENGINE_DIR=/workflow/TensorRT-LLM/examples/deepseek_v3/ds-3.2-engine
+  - MODEL_DOWNLOAD_DIR=/root/.cache/DeepSeek-R1
+  - TOKENIZER_DIR=/root/.cache/DeepSeek-R1 # for Deepseek it will be DeepSeek-V2-Lite
+  - MODEL_FOLDER=/workflow/triton_model_repo
+  - TRITON_MAX_BATCH_SIZE=1
+  - INSTANCE_COUNT=1
+  - MAX_QUEUE_DELAY_MS=0
+  - MAX_QUEUE_SIZE=0
+  - FILL_TEMPLATE_SCRIPT=/workflow/tensorrtllm_backend/tools/fill_template.py
+  - DECOUPLED_MODE=true # true for streaming
+
+init:
+  # - git clone --branch v0.17.0 --depth 1 https://github.com/triton-inference-server/tensorrtllm_backend.git
+  # - git clone --branch deepseek --single-branch https://github.com/NVIDIA/TensorRT-LLM.git
+  - git clone https://github.com/triton-inference-server/tensorrtllm_backend.git
+  - git clone https://github.com/NVIDIA/TensorRT-LLM.git
+  - git clone https://github.com/triton-inference-server/server.git
+  - cd $SCRIPT_DIR
+  - apt-get -y install git git-lfs
+  - git lfs install
+  - git config --global credential.helper store
+  - huggingface-cli login --token $HF_TOKEN --add-to-git-credential
+  # - git clone "$MODEL_REPO" "$MODEL_DOWNLOAD_DIR"
+  # - python3 convert_checkpoint.py --model_dir $TOKENIZER_DIR  --output_dir $CHECK_POINT_DIR --dtype bfloat16 --tp_size $DSTACK_GPUS_NUM --use_fp8_weights --workers 8
+  # - trtllm-build --checkpoint_dir $CHECK_POINT_DIR --output_dir $ENGINE_DIR --max_seq_len $MAX_SEQ_LEN --max_input_len $MAX_INPUT_LEN --max_batch_size $MAX_BATCH_SIZE --use_paged_context_fmha enable --workers 8
+  # - mpirun --allow-run-as-root -n $DSTACK_GPUS_NUM python3 ../run.py --engine_dir $ENGINE_DIR  --max_output_len 40 --tokenizer_dir $TOKENIZER_DIR  --input_text "What is Deep Learning?"
+  # - mkdir $MODEL_FOLDER
+  # - cp -r /workflow/tensorrtllm_backend/all_models/inflight_batcher_llm/* $MODEL_FOLDER/
+  # - python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/ensemble/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},logits_datatype:TYPE_FP8
+  # - python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/preprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},preprocessing_instance_count:${INSTANCE_COUNT}
+  # - python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm/config.pbtxt triton_backend:tensorrtllm,triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},engine_dir:${ENGINE_DIR},max_queue_delay_microseconds:${MAX_QUEUE_DELAY_MS},batching_strategy:inflight_fused_batching,max_queue_size:${MAX_QUEUE_SIZE},encoder_input_features_data_type:TYPE_FP8,logits_datatype:TYPE_FP8
+  # - python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/postprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},postprocessing_instance_count:${INSTANCE_COUNT},max_queue_size:${MAX_QUEUE_SIZE}
+  # - python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm_bls/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},bls_instance_count:${INSTANCE_COUNT},logits_datatype:TYPE_FP8
+  # - python3 /workflow/tensorrtllm_backend/scripts/launch_triton_server.py --world_size=$DSTACK_GPUS_NUM --model_repo=${MODEL_FOLDER} --log-file "/workflow/triton_log.txt"
+  
+  # - python3 /workflow/server/python/openai/openai_frontend/main.py --model-repository ${MODEL_FOLDER} --tokenizer deepseek-ai/DeepSeek-R1  --openai-port 8000
+
+
+volumes:
+  - /home/dstack/.cache:/root/.cache
+
+  #SEND REQUEST TRITON INFERENCE SERVER
+#   curl -X POST localhost:8000/v2/models/ensemble/generate -d \
+# '{
+# "text_input": "A farmer with a wolf, a goat, and a cabbage must cross a river by boat. The boat can carry only the farmer and a single item. If left unattended together, the wolf would eat the goat, or the goat would eat the cabbage. How can they cross the river without anything being eaten?",
+# "parameters": {
+# "max_tokens": 256,
+# "bad_words":[""],
+# "stop_words":[""]
+# }
+# }' | jq
+
+
+# docker run --rm -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864  \
+#     		--gpus=all \
+#     		--volume /home/dstack/.cache:/root/.cache/ \
+#     		--env "CCACHE_DIR=/code/tensorrt_llm/cpp/.ccache" \
+#     		--env "CCACHE_BASEDIR=/code/tensorrt_llm" \
+#     		--workdir /app/tensorrt_llm \
+#     		--hostname ll-h200-demo3-release \
+#     		--name tensorrt_llm-release-dstack \
+# 		    --tmpfs /tmp:exec \
+#     		tensorrt_llm/release:latest
+
+# cd examples/pytorch
+# python quickstart_advanced.py --model_dir  --tp_size 8
+
+# python quickstart_advanced.py --model_dir /root/.cache/DeepSeek-R1 --tp_size 8
+
+# python benchmarks/cpp/prepare_dataset.py \
+#   --tokenizer=deepseek-ai/DeepSeek-R1 \
+#   --stdout token-norm-dist \
+#   --num-requests=8192 \
+#   --input-mean=1000 \
+#   --output-mean=1000 \
+#   --input-stdev=0 \
+#   --output-stdev=0 > /workspace/dataset.txt
+
+# echo -e "enable_attention_dp: false\npytorch_backend_config:\n  enable_overlap_scheduler: true\n  use_cuda_graph: true\n  cuda_graph_max_batch_size: 128" > extra-llm-api-config.yml
+
+# echo -e "{\"quantization\": {\"quant_algo\": \"FP8_BLOCK_SCALES\", \"kv_cache_quant_algo\": null}}" > /root/.cache/DeepSeek-R1/hf_quant_config.json
+
+#   trtllm-bench \
+#   --model deepseek-ai/DeepSeek-R1 \
+#   --model_path /root/.cache/DeepSeek-R1 \
+#   throughput \
+#   --backend pytorch \
+#   --max_batch_size 8 \
+#   --max_num_tokens 1160 \
+#   --dataset /workspace/dataset.txt \
+#   --tp 8 \
+#   --ep 4 \
+#   --pp 1 \
+#   --concurrency 128 \
+#   --streaming \
+#   --kv_cache_free_gpu_mem_fraction 0.95 \
+#   --extra_llm_api_options ./extra-llm-api-config.yml 2>&1 | tee /workspace/trt_bench.log
+
+
+# trtllm-build --checkpoint_dir /root/.cache/ds-3.2-ckpt --output_dir /root/.cache/ds-engine --max_seq_len 4096 --max_input_len 2048 --max_batch_size 4 --use_paged_context_fmha enable --workers 8
+# trtllm-build --checkpoint_dir /root/.cache/ds-3.2-ckpt --output_dir /root/.cache/ds-engine-vlarge --max_seq_len 128000 --max_input_len 64000 --max_num_tokens 16384 --max_batch_size 2048 --use_paged_context_fmha enable --workers 8
+# mpirun --allow-run-as-root -n 8 python3 run.py --engine_dir /root/.cache/ds-engine-128000 --max_output_len 40 --tokenizer_dir /root/.cache/DeepSeek-R1  --input_text "What is Deep Learning?"
+
+
+
+#pip uninstall tensorrt_llm -y
+#pip install /root/.cache/trt-llm-build-for-deepseek/tensorrt_llm*.whl
+##pip install tensorrt(Note)
+FILL_TEMPLATE_SCRIPT=/workflow/tensorrtllm_backend/tools/fill_template.py
+TRITON_MAX_BATCH_SIZE=256
+TOKENIZER_DIR=/root/.cache/DeepSeek-R1
+INSTANCE_COUNT=1
+MAX_QUEUE_DELAY_MS=0
+MAX_QUEUE_SIZE=0
+DECOUPLED_MODE=true
+ENGINE_DIR=/root/.cache/ds-engine-128000
+MODEL_FOLDER=/root/.cache/triton-deepseek-128k
+#cp -r /workflow/tensorrtllm_backend/all_models/inflight_batcher_llm/* $MODEL_FOLDER/
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/ensemble/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},logits_datatype:TYPE_BF16
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/preprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},preprocessing_instance_count:${INSTANCE_COUNT}
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm/config.pbtxt triton_backend:tensorrtllm,triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},engine_dir:${ENGINE_DIR},max_queue_delay_microseconds:${MAX_QUEUE_DELAY_MS},batching_strategy:inflight_fused_batching,max_queue_size:${MAX_QUEUE_SIZE},encoder_input_features_data_type:TYPE_BF16,logits_datatype:TYPE_BF16
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/postprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},postprocessing_instance_count:${INSTANCE_COUNT},max_queue_size:${MAX_QUEUE_SIZE}
+#python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm_bls/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},bls_instance_count:${INSTANCE_COUNT},logits_datatype:TYPE_BF16
+#python3 /workflow/tensorrtllm_backend/scripts/launch_triton_server.py --world_size=$DSTACK_GPUS_NUM --model_repo=${MODEL_FOLDER} --log-file "/workflow/triton_log.txt"

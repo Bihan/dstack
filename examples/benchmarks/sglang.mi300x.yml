@@ -1,0 +1,23 @@
+type: service
+name: deepseek-r1-sglang
+
+image: rocm/sglang-staging:20250212
+env:
+  - MODEL_ID=deepseek-ai/DeepSeek-R1
+  - HSA_NO_SCRATCH_RECLAIM=1
+commands:
+  - python3 -m sglang.launch_server --model-path $MODEL_ID --port 8000 --tp 8 --trust-remote-code
+
+port: 8000
+
+model: deepseek-ai/DeepSeek-R1
+
+
+resources:
+  gpu: 8:mi300x
+
+volumes:
+  - /root/.cache/huggingface:/root/.cache/huggingface
+
+
+  

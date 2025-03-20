@@ -1,0 +1,9 @@
+type: fleet
+name: mi300x-fleet
+
+ssh_config:
+  user: root
+  identity_file: ~/.ssh/id_rsa
+  hosts:
+    - hostname: 96.30.198.82
+      blocks: auto

@@ -1,0 +1,35 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: prefix-test
+
+# Uncomment to use a custom Docker image
+image: lmsysorg/sglang:latest
+
+ide: vscode
+
+env:
+ - MODEL_ID=meta-llama/Llama-3.1-8B-Instruct
+
+init:
+  - python3 -m sglang.launch_server --model-path $MODEL_ID --port 30000 
+  # - python3 -m sglang.launch_server --model-path $MODEL_ID --port 30000 --disable-radix-cache
+  - python3 -m sglang.bench_serving \
+    --backend sglang \
+    --base-url http://127.0.0.1:30000 \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --dataset-name generated-shared-prefix \
+    --gsp-num-groups 2 \
+    --gsp-prompts-per-group 2 \
+    --gsp-system-prompt-len 100 \
+    --gsp-question-len 10 \
+    --gsp-output-len 1 \
+    --num-prompts 4
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+resources:
+  gpu: 24GB
+
+
+  

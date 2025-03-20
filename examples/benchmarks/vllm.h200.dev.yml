@@ -1,0 +1,75 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: h200-vllm
+
+# Uncomment to use a custom Docker image
+# python: 3.12
+image: vllm/vllm-openai:v0.7.3
+
+ide: vscode
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+env:
+ - VLLM_ATTENTION_BACKEND=FLASHMLA
+
+init:
+  - pip uninstall -y vllm
+  - pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  # - vllm serve deepseek-ai/DeepSeek-R1 --enable-prefix-caching --trust-remote-code --tensor-parallel-size 8 --enable-chunked-prefill
+  # - apt update
+  # - apt install wget
+  # - wget https://raw.githubusercontent.com/sgl-project/sglang/main/python/sglang/bench_serving.py
+  
+  # for vllm
+  # python3 bench_serving.py --backend vllm --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output 800 --max-concurrency "${concurrency}"
+
+  # for sglang
+  # python3 -m sglang.bench_serving --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output 1600 --max-concurrency 128
+
+resources:
+  gpu: 8:H200
+  shm_size: 32GB
+  disk: 2000GB..
+
+# volumes:
+#   - /root/.cache:/root/.cache
+
+# python3 bench_serving.py \
+#     --backend vllm \
+#     --base-url http://127.0.0.1:8000 \
+#     --model deepseek-ai/DeepSeek-R1 \
+#     --dataset-name generated-shared-prefix \
+#     --gsp-num-groups 10 \
+#     --gsp-prompts-per-group 5 \
+#     --gsp-system-prompt-len 2000 \
+#     --gsp-question-len 1200 \
+#     --gsp-output-len 800 \
+#     --num-prompts 50 \
+#     --max-concurrency 128
+
+#     python3 bench_serving.py \
+#     --backend vllm
+#     --dataset-name generated-shared-prefix \
+#     --gsp-num-groups 2 \
+#     --gsp-prompts-per-group 2 \
+#     --gsp-system-prompt-len 32 \
+#     --gsp-question-len 32 \
+#     --gsp-output-len 16 \
+#     --num-prompts 4 \
+#     --max-concurrency 1
+
+
+#     python3 bench_serving.py --backend vllm --dataset-name random --random-range-ratio 1 --num-prompt 50 --random-input 320 --random-output 80 --max-concurrency 1
+
+
+#     python3 -m sglang.bench_serving \
+#     --dataset-name generated-shared-prefix \
+#     --gsp-num-groups 10 \
+#     --gsp-prompts-per-group 50 \
+#     --gsp-system-prompt-len 2000 \
+#     --gsp-question-len 1200 \
+#     --gsp-output-len 800 \
+#     --num-prompts 500 \
+#     --max-concurrency 128

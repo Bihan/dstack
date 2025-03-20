@@ -1,0 +1,40 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: vllm-mi300
+
+# Uncomment to use a custom Docker image
+image: rocm/vllm-dev:vllm-ds3-staging-0217
+
+env:
+ - VLLM_FP8_PADDING=0
+ - VLLM_USE_TRITON_FLASH_ATTN=0
+
+ide: vscode
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+# init:
+#  - vllm serve deepseek-ai/DeepSeek-R1 --tensor-parallel-size 8 --trust-remote-code --max-model-len 32768
+#  - apt update
+#  - apt install wget
+#  - wget https://raw.githubusercontent.com/vllm-project/vllm/main/benchmarks/benchmark_utils.py 
+#  - wget https://raw.githubusercontent.com/sgl-project/sglang/main/python/sglang/bench_serving.py
+#  - python3 bench_serving.py --backend vllm --dataset-name generated-shared-prefix --gsp-num-groups 10 --gsp-prompts-per-group 50 --gsp-system-prompt-len 2000 --gsp-question-len 1200 --gsp-output-len 800 --num-prompts 500 --max-concurrency 128 
+  
+resources:
+  gpu: 8:mi300x
+
+volumes:
+  - /root/.cache/huggingface:/root/.cache/huggingface
+
+  # This works
+  # docker run -it --rm --ipc=host -p 8000:8000 --group-add render \
+  #   --security-opt seccomp=unconfined \
+  #   --cap-add=SYS_PTRACE \
+  #   --device=/dev/kfd --device=/dev/dri  \
+  #   -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+  #   -e VLLM_FP8_PADDING=0 \
+  #   -e VLLM_USE_TRITON_FLASH_ATTN=0 \
+  #   rocm/vllm-dev:vllm-ds3-staging-0217 \
+  #   /bin/bash

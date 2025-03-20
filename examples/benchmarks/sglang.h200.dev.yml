@@ -1,0 +1,58 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: sg-h200
+
+# Uncomment to use a custom Docker image
+image: lmsysorg/sglang:latest
+
+ide: vscode
+
+# Use either spot or on-demand instances
+spot_policy: auto
+
+# init:
+  # - python3 -m sglang.launch_server --model deepseek-ai/DeepSeek-R1 --tp 8 --trust-remote-code --enable-dp-attention
+  # - python3 -m sglang.bench_serving --backend sglang --dataset-name generated-shared-prefix --gsp-num-groups 10 --gsp-prompts-per-group 50 --gsp-system-prompt-len 2000 --gsp-question-len 1200 --gsp-output-len 800 --num-prompts 500 --max-concurrency 128 
+  
+  # - concurrency_values=(8)
+  # - for concurrency in "${concurrency_values[@]}"; do 
+  # -   python3 bench_serving.py --backend vllm --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output 800 --max-concurrency "${concurrency}"
+  # - done
+  
+  # for vllm
+  # python3 bench_serving.py --backend vllm --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output 800 --max-concurrency "${concurrency}"
+
+  # for sglang
+  # python3 -m sglang.bench_serving --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output 800 --max-concurrency "${concurrency}"
+
+resources:
+  gpu: 8:H200
+  cpu: 224
+  shm_size: 32GB
+
+volumes:
+  - /home/dstack/.cache:/root/.cache
+
+
+# python3 -m sglang.bench_serving \
+#     --dataset-name generated-shared-prefix \
+#     --gsp-num-groups 10 \
+#     --gsp-prompts-per-group 50 \
+#     --gsp-system-prompt-len 2000 \
+#     --gsp-question-len 1200 \
+#     --gsp-output-len 800 \
+#     --num-prompts 500 \
+#     --max-concurrency "${concurrency}"
+
+
+# python3 bench_serving.py --backend vllm --dataset-name random --random-range-ratio 1 --num-prompt 500 --random-input 3200 --random-output "${out_value}" --max-concurrency 128
+# python3 benchmark_throughput.py \
+#    --backend sglang \
+#    --model deepseek-ai/DeepSeek-R1 \
+#    --input-len=3200 \
+#    --output-len=800 \
+#    --tensor-parallel-size=8 \
+#    --max-model-len=32768 \
+#    --num-prompts=32 \
+#    --enable-dp-attention=True \
+#    --output-json sglang_3200_800_32

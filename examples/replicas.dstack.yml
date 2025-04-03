@@ -1,0 +1,23 @@
+type: service
+# The name is optional, if not specified, generated randomly
+name: replica-test
+
+image: lmsysorg/sglang:latest
+
+# Required environment variables
+env:
+  - HF_TOKEN
+commands:
+  - python3 -m sglang.launch_server
+     --model-path meta-llama/Meta-Llama-3.1-8B-Instruct
+     --port 8000
+     --trust-remote-code
+# Expose the port of the service
+port: 8000
+
+resources:
+  # Change to what is required
+  gpu: 24GB
+
+# Minimum and maximum number of replicas
+replicas: 2

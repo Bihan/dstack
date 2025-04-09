@@ -1,0 +1,18 @@
+type: dev-environment
+name: llama4-scout
+ide: vscode
+image: rocm/vllm-dev:llama4-20250407
+env:
+  - HF_TOKEN
+  - MODEL_ID=meta-llama/Llama-4-Scout-17B-16E-Instruct
+  - VLLM_DISABLE_COMPILE_CACHE=1
+  - MAX_MODEL_LEN=256000
+# commands:
+   
+# port: 8000
+# # Register the model
+# model: meta-llama/Llama-4-Scout-17B-16E-Instruct
+
+resources:
+  gpu: Mi300x:2
+  disk: 500GB..

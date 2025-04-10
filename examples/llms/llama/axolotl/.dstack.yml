@@ -1,0 +1,17 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: llama4-scout
+ide: vscode
+# Using the official Axolotl's Docker image
+image: axolotlai/axolotl
+
+# Required environment variables
+env:
+  - HF_TOKEN
+  # - WANDB_API_KEY
+# Commands of the task
+init:
+  - wget https://raw.githubusercontent.com/axolotl-ai-cloud/axolotl/main/examples/llama-4/scout-qlora-single-h100.yaml
+
+resources:
+  gpu: H100

@@ -3,15 +3,21 @@ type: dev-environment
 name: llama4-scout
 ide: vscode
 # Using the official Axolotl's Docker image
-image: axolotlai/axolotl
+image: axolotlai/axolotl:main-latest
 
 # Required environment variables
 env:
   - HF_TOKEN
-  # - WANDB_API_KEY
+  - WANDB_API_KEY
+  - WANDB_PROJECT
+  - WANDB_NAME
 # Commands of the task
-init:
-  - wget https://raw.githubusercontent.com/axolotl-ai-cloud/axolotl/main/examples/llama-4/scout-qlora-single-h100.yaml
+commands:
+  - wget https://raw.githubusercontent.com/axolotl-ai-cloud/axolotl/main/examples/llama-4/scout-qlora-fsdp1.yaml
+  - axolotl train scout-qlora-fsdp1.yaml --wandb-project $WANDB_PROJECT --wandb-name $WANDB_NAME
 
 resources:
-  gpu: H100
+  gpu: H100:2
+  # Shared memory size for inter-process communication
+  shm_size: 24GB
+  disk: 500GB..

@@ -1,0 +1,13 @@
+type: fleet
+# The name is optional, if not specified, generated randomly
+name: hotaisle-fleet
+
+# Uncomment if instances are interconnected
+#placement: cluster
+
+# SSH credentials for the on-prem servers
+ssh_config:
+  user: hotaisle
+  identity_file: ~/.ssh/id_rsa
+  hosts:
+    - 23.183.40.75

@@ -1,0 +1,30 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: megatron
+
+# python: "3.11"
+# Uncomment to use a custom Docker image
+image: nvcr.io/nvidia/pytorch:25.03-py3
+
+ide: vscode
+
+init:
+  - git clone https://github.com/NVIDIA/Megatron-LM.git
+  - mkdir pretraining
+  - cd pretraining
+  # Get vocab and merge table
+  - wget https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-vocab.json
+  - wget https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-merges.txt
+  # Get Data
+  - wget https://openaipublic.azureedge.net/gpt-2/output-dataset/v1/small-117M.train.jsonl
+  # For --worker set variable interpolation.
+  - python /workflow/Megatron-LM/tools/preprocess_data.py --input small-117M.train.jsonl --output-prefix my-gpt2 --vocab-file gpt2-vocab.json --tokenizer-type GPT2BPETokenizer --merge-file gpt2-merges.txt --append-eod --workers 16
+
+
+  # download data
+
+# Use either spot or on-demand instances
+spot_policy: on-demand
+
+resources:
+  gpu: 1

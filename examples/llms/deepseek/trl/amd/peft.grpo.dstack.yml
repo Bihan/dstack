@@ -1,0 +1,76 @@
+type: dev-environment
+# The name is optional, if not specified, generated randomly
+name: trl-train-grpo
+
+image: rocm/pytorch:rocm6.2.3_ubuntu22.04_py3.10_pytorch_release_2.3.0
+# Required environment variables
+env:
+  - WANDB_API_KEY
+  - WANDB_PROJECT
+  - MODEL_ID=deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+  - HF_TOKEN
+# Commands of the task
+init:
+  # - pip install trl
+  # - pip install datasets
+  # - pip install peft
+  # - pip install wandb
+  # - pip install --no-deps --force-reinstall 'https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_multi-backend-refactor/bitsandbytes-0.44.1.dev0-py3-none-manylinux_2_24_x86_64.whl'
+  # # numpy version less than 2 is required for the scipy installation with AMD.
+  # - pip install "numpy<2"
+  # - mkdir -p grpo_example
+  # - cp examples/llms/deepseek/trl/amd/grpo_peft_train.py grpo_example/grpo_peft_train.py
+  # - cd grpo_example
+  # - python grpo_train.py
+  #   --model_name_or_path $MODEL_ID
+  #   --dataset_name trl-lib/tldr
+  #   --per_device_train_batch_size 2
+  #   --logging_steps 25
+  #   --output_dir Deepseek-Distill-Qwen-1.5B-GRPO
+  #   --trust_remote_code
+
+volumes:
+  - /root/.cache/huggingface/hub:/root/.cache/huggingface/hub
+
+# GRPO fine-tuning of DeepSeek-R1-Distill-Qwen-1.5B consumes 70% of VRAM
+resources:
+  gpu: MI300X
+  disk: 150GB..
+
+
+  #Testing
+  # python grpo_peft_train.py \
+  # --model_name_or_path $MODEL_ID \
+  # --dataset_name trl-lib/tldr \
+  # --per_device_train_batch_size 2 \
+  # --num_generations 2 \
+  # --logging_steps 25 \
+  # --output_dir Deepseek-Distill-Qwen-1.5B-GRPO \
+  # --trust_remote_code
+
+
+  # python grpo_peft_train.py \
+  # --model_name_or_path $MODEL_ID \
+  # --dataset_name AgentGym/AgentTraj-L \
+  # --per_device_train_batch_size 2 \
+  # --num_generations 2 \
+  # --logging_steps 25 \
+  # --output_dir Deepseek-Agent \
+  # --trust_remote_code
+
+python grpo_peft_train.py \
+  --model_name_or_path $MODEL_ID \
+  --dataset_name AgentGym/AgentTraj-L \
+  --per_device_train_batch_size 4 \
+  --gradient_accumulation_steps 1 \
+  --num_generations 2 \
+  --num_train_epochs 1 \
+  --logging_steps 5 \
+  --save_steps 30 \
+  --save_total_limit 2 \
+  --output_dir /root/.cache/huggingface/hub/Deepseek-Agent_New \
+  --trust_remote_code
+  # --resume_from_checkpoint /root/.cache/huggingface/hub/Deepseek-Agent/checkpoint-30
+
+
+  

@@ -13,8 +13,8 @@ port: 8000
 
 model: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
 
-volumes:
-  - /root/.cache/huggingface/hub:/root/.cache/huggingface/hub
+# volumes:
+#   - /root/.cache/huggingface/hub:/root/.cache/huggingface/hub
 
 resources:
     gpu: mi300x

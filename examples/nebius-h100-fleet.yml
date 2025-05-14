@@ -1,0 +1,9 @@
+type: fleet
+name: my-fleet
+
+nodes: 2
+placement: cluster
+backend: nebius
+
+resources:
+  gpu: H100:8

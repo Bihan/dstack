@@ -1,0 +1,14 @@
+type: task
+name: multi-node-finetuning
+
+nodes: 2
+
+image: rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
+# env:
+  # - NCCL_DEBUG=INFO
+  # - NCCL_HOME=/opt/rocm-6.4.0/lib/
+commands:
+  - sleep infinity
+  
+resources:
+  gpu: mi300x:8

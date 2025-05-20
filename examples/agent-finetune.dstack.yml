@@ -1,10 +1,8 @@
 type: dev-environment
 # The name is optional, if not specified, generated randomly
-name: vscode
+name: agent-fine-tuning
 nvcc: true
 python: "3.11"
-# Uncomment to use a custom Docker image
-#image: dstackai/base:py3.13-0.7-cuda-12.1
 
 env: 
  - WANDB_API_KEY

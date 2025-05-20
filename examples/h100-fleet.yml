@@ -1,0 +1,15 @@
+type: fleet
+name: lambda-h100-fleet
+
+ssh_config:
+  user: ubuntu
+  identity_file: ~/.ssh/peterschmidt85
+  hosts:
+    - lambda-cluster-node-001
+    - lambda-cluster-node-002
+  proxy_jump:
+    hostname: 192.222.48.90 # Head node 001 (public IP)
+    user: ubuntu
+    identity_file: ~/.ssh/peterschmidt85
+
+placement: cluster

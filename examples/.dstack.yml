@@ -1,12 +1,11 @@
 type: dev-environment
-name: cursor
+name: hotaisle-vm-test
 
-python: 3.12
-ide: cursor
-
-files: 
-  - .:examples
-  - ~/.ssh/id_rsa:/root/.ssh/id_rsa
+ide: vscode
+image: rocm/dev-ubuntu-22.04:6.4-complete
+# files: 
+#   - .:examples
+#   - ~/.ssh/id_rsa:/root/.ssh/id_rsa
 
 resources:
   gpu: 1

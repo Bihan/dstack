@@ -8,4 +8,4 @@ image: rocm/dev-ubuntu-22.04:6.4-complete
 #   - ~/.ssh/id_rsa:/root/.ssh/id_rsa
 
 resources:
-  gpu: 1
+  gpu: MI300X:1

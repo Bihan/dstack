@@ -61,11 +61,11 @@ class LambdaCompute(
         # Step 2: Get SSH key (keep Lambda pattern for now)
         project_ssh_key = instance_config.ssh_keys[0]
 
-        # Step 3: Upload SSH key to Hotaisle FIRST
+        # Step 3: Upload SSH key to Hotaisle FIRST (before VM creation)
         print(f"Uploading SSH key to Hotaisle for instance {instance_name}...")
         ssh_upload_success = self._upload_ssh_key_to_hotaisle(project_ssh_key.public)
         if not ssh_upload_success:
-            raise Exception("Failed to upload SSH key to Hotaisle")
+            print("Warning: SSH key upload failed, but continuing with VM creation")
 
         # Step 4: Create Hotaisle VM payload (adapted from hotaisle/compute.py)
         vm_payload = {
@@ -82,7 +82,7 @@ class LambdaCompute(
             "gpus": [{"count": 1, "manufacturer": "AMD", "model": "MI300X"}],
         }
 
-        # Step 5: Call Hotaisle API instead of Lambda API
+        # Step 5: Call Hotaisle API to create VM
         # Replace Lambda's launch_instances with Hotaisle's create_vm
         import os
 
@@ -111,6 +111,7 @@ class LambdaCompute(
 
         vm_data = response.json()
         print(f"Hotaisle VM created: {vm_data['name']} at {vm_data['ip_address']}")
+        print(f"SSH access info: {vm_data.get('ssh_access', 'Not found')}")
 
         # Step 6: Return JobProvisioningData (adapted for Hotaisle)
         return JobProvisioningData(
@@ -184,6 +185,12 @@ class LambdaCompute(
                     f"Hotaisle VM {provisioning_data.instance_id} is running at {provisioning_data.hostname}"
                 )
 
+            # Ensure SSH key is uploaded and accessible for this VM
+            print(f"Ensuring SSH key is available for VM {provisioning_data.instance_id}...")
+            self._ensure_ssh_key_available(
+                project_ssh_public_key, provisioning_data.hostname, project_ssh_private_key
+            )
+
             # Get shim commands and start installation
             commands = get_shim_commands(
                 authorized_keys=[project_ssh_public_key],
@@ -241,6 +248,52 @@ class LambdaCompute(
             print(f"Exception checking VM state: {e}")
             return "unknown"
 
+    def _ensure_ssh_key_available(self, public_key: str, hostname: str, private_key: str) -> bool:
+        """Ensure SSH key is available on the VM, with retries and re-upload if needed"""
+        import time
+
+        max_retries = 3
+        retry_delay = 10  # seconds
+
+        for attempt in range(max_retries):
+            print(f"Testing SSH access to {hostname} (attempt {attempt + 1}/{max_retries})...")
+
+            # Test SSH access
+            with tempfile.NamedTemporaryFile("w+", 0o600) as f:
+                f.write(private_key)
+                f.flush()
+                result = subprocess.run(
+                    [
+                        "ssh",
+                        "-o",
+                        "ConnectTimeout=10",
+                        "-o",
+                        "StrictHostKeyChecking=no",
+                        "-i",
+                        f.name,
+                        f"hotaisle@{hostname}",
+                        "echo 'SSH access successful'",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+
+            if result.returncode == 0:
+                print(f"SSH access to {hostname} successful!")
+                return True
+            else:
+                print(f"SSH access failed: {result.stderr}")
+
+            if attempt < max_retries - 1:
+                # Re-upload SSH key and wait before retry
+                print(f"Re-uploading SSH key and waiting {retry_delay} seconds before retry...")
+                self._upload_ssh_key_to_hotaisle(public_key)
+                time.sleep(retry_delay)
+
+        print(f"Failed to establish SSH access to {hostname} after {max_retries} attempts")
+        return False
+
     def _run_hotaisle_setup_commands(self, hostname: str, ssh_private_key: str) -> bool:
         """Run basic setup commands on Hotaisle VM (adapted from hotaisle/compute.py)"""
         setup_commands = (
@@ -281,8 +334,44 @@ class LambdaCompute(
     def terminate_instance(
         self, instance_id: str, region: str, backend_data: Optional[str] = None
     ):
-        pass
-        # self.api_client.terminate_instances(instance_ids=[instance_id])
+        """Terminate Hotaisle VM instance"""
+        import os
+
+        import requests
+
+        hotaisle_api_key = os.getenv("HOTAISLE_API_KEY")
+        if not hotaisle_api_key:
+            print("Warning: HOTAISLE_API_KEY not found, cannot terminate VM")
+            return
+
+        # instance_id contains the VM name from Hotaisle
+        vm_name = instance_id
+        url = f"https://admin.hotaisle.app/api/teams/dstackai/virtual_machines/{vm_name}/"
+        headers = {
+            "accept": "application/json",
+            "Authorization": hotaisle_api_key,
+        }
+
+        print(f"Terminating Hotaisle VM: {vm_name}")
+
+        try:
+            response = requests.delete(url, headers=headers, timeout=30)
+
+            if response.status_code in [200, 204]:
+                print(f"Hotaisle VM {vm_name} terminated successfully!")
+            elif response.status_code == 404:
+                print(f"Hotaisle VM {vm_name} not found (may already be terminated)")
+            else:
+                print(f"Failed to terminate VM {vm_name}. Status: {response.status_code}")
+                print(f"Response: {response.text}")
+                raise Exception(f"VM termination failed: {response.status_code} - {response.text}")
+
+        except requests.RequestException as e:
+            print(f"Network error while terminating VM {vm_name}: {e}")
+            raise Exception(f"Network error during VM termination: {e}")
+        except Exception as e:
+            print(f"Unexpected error while terminating VM {vm_name}: {e}")
+            raise
 
     def _get_offers_with_availability(
         self, offers: List[InstanceOffer]

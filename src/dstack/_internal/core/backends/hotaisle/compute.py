@@ -1,56 +1,423 @@
-import argparse
 import shlex
 import subprocess
 import tempfile
 from threading import Thread
-from typing import Any, Dict
+from typing import List, Optional
 
-import requests
+from dstack._internal.core.backends.base.compute import (
+    Compute,
+    ComputeWithCreateInstanceSupport,
+    generate_unique_instance_name,
+    get_shim_commands,
+)
+from dstack._internal.core.backends.base.offers import get_catalog_offers
+from dstack._internal.core.backends.hotaisle.models import HotaisleConfig
+from dstack._internal.core.models.backends.base import BackendType
+from dstack._internal.core.models.instances import (
+    InstanceAvailability,
+    InstanceConfiguration,
+    InstanceOffer,
+    InstanceOfferWithAvailability,
+)
+from dstack._internal.core.models.placement import PlacementGroup
+from dstack._internal.core.models.runs import JobProvisioningData, Requirements
+from dstack._internal.utils.logging import get_logger
 
-# Import the REAL shim commands from dstack
-try:
-    from dstack._internal.core.backends.base.compute import get_shim_commands
+logger = get_logger(__name__)
 
-    REAL_SHIM_AVAILABLE = True
-    print("Using REAL dstack shim commands")
-except ImportError:
-    REAL_SHIM_AVAILABLE = False
-    print("Warning: Real dstack shim not available, using simplified version")
+MAX_INSTANCE_NAME_LEN = 60
 
 
-def upload_ssh_key_to_hotaisle(api_key: str, public_key: str) -> bool:
-    """Upload SSH public key to Hotaisle user account"""
-    url = "https://admin.hotaisle.app/api/user/ssh_keys/"
+class HotaisleCompute(
+    ComputeWithCreateInstanceSupport,
+    Compute,
+):
+    def __init__(self, config: HotaisleConfig):
+        super().__init__()
+        self.config = config
+        # Set up catalog with Hotaisle provider (following VastAI pattern)
+        import gpuhunt
+        from gpuhunt.providers.hotaisle import HotAisleProvider
 
-    headers = {
-        "accept": "application/json",
-        "Authorization": api_key,
-        "Content-Type": "application/json",
-    }
+        self.catalog = gpuhunt.Catalog(balance_resources=False, auto_reload=False)
+        self.catalog.add_provider(
+            HotAisleProvider(api_key=config.creds.api_key, team_handle=config.team_handle)
+        )
 
-    payload = {"authorized_key": public_key}
+    def get_offers(
+        self, requirements: Optional[Requirements] = None
+    ) -> List[InstanceOfferWithAvailability]:
+        print(f"DEBUG: Getting offers for requirements: {requirements}")
+        print(f"DEBUG: Config regions: {self.config.regions}")
 
-    print("Uploading SSH key to Hotaisle...")
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
+        offers = get_catalog_offers(
+            backend=BackendType.HOTAISLE,
+            locations=self.config.regions or None,
+            requirements=requirements,
+            catalog=self.catalog,
+        )
+        print(f"DEBUG: Found {len(offers)} offers: {offers}")
+        offers_with_availability = self._get_offers_with_availability(offers)
+        print(f"DEBUG: Offers with availability: {len(offers_with_availability)}")
+        return offers_with_availability
 
-    if response.status_code in [200, 201]:
-        print("SSH key uploaded successfully!")
-        return True
-    elif response.status_code == 409:
-        print("SSH key already exists in Hotaisle account - skipping upload")
-        return True
-    else:
-        print(f"SSH key upload failed. Status: {response.status_code}")
-        print(f"Response: {response.text}")
+    def create_instance(
+        self,
+        instance_offer: InstanceOfferWithAvailability,
+        instance_config: InstanceConfiguration,
+        placement_group: Optional[PlacementGroup],
+    ) -> JobProvisioningData:
+        # Step 1: Generate instance name
+        instance_name = generate_unique_instance_name(
+            instance_config, max_length=MAX_INSTANCE_NAME_LEN
+        )
+
+        # Step 2: Get SSH key
+        project_ssh_key = instance_config.ssh_keys[0]
+
+        # Step 3: Upload SSH key to Hotaisle FIRST (before VM creation)
+        print(f"Uploading SSH key to Hotaisle for instance {instance_name}...")
+        ssh_upload_success = self._upload_ssh_key_to_hotaisle(project_ssh_key.public)
+        if not ssh_upload_success:
+            print("Warning: SSH key upload failed, but continuing with VM creation")
+
+        # Step 4: Create Hotaisle VM payload based on instance offer
+        instance_type = instance_offer.instance
+
+        # For now, use hardcoded values as in your working example
+        # TODO: Map instance_offer details to appropriate Hotaisle VM specs
+        vm_payload = {
+            "cpu_cores": instance_type.resources.cpus,
+            "cpus": {
+                "count": 1,
+                "manufacturer": "Intel",
+                "model": "Xeon Platinum 8470",
+                "cores": instance_type.resources.cpus,
+                "frequency": 2600000000,
+            },
+            "disk_capacity": int(instance_type.resources.disk.size_mib * 1024 * 1024)
+            if instance_type.resources.disk
+            else 13194139533312,
+            "ram_capacity": int(instance_type.resources.memory_mib * 1024 * 1024),
+            "gpus": [
+                {
+                    "count": len(instance_type.resources.gpus),
+                    "manufacturer": "AMD",  # Hotaisle uses AMD GPUs
+                    "model": instance_type.resources.gpus[0].name
+                    if instance_type.resources.gpus
+                    else "MI300X",
+                }
+            ]
+            if instance_type.resources.gpus
+            else [],
+        }
+
+        # Step 5: Call Hotaisle API to create VM
+
+        import requests
+
+        # Use credentials from config instead of environment variables
+        api_key = self.config.creds.api_key
+        team_handle = self.config.team_handle
+
+        url = f"https://admin.hotaisle.app/api/teams/{team_handle}/virtual_machines/"
+        headers = {
+            "accept": "application/json",
+            "Authorization": api_key,
+            "Content-Type": "application/json",
+        }
+
+        print(f"Creating Hotaisle VM: {instance_name}")
+        print(f"Payload: {vm_payload}")
+
+        response = requests.post(url, headers=headers, json=vm_payload, timeout=60)
+
+        if response.status_code not in [200, 201]:
+            raise Exception(
+                f"Hotaisle VM creation failed: {response.status_code} - {response.text}"
+            )
+
+        vm_data = response.json()
+        print(f"Hotaisle VM created: {vm_data['name']} at {vm_data['ip_address']}")
+        print(f"SSH access info: {vm_data.get('ssh_access', 'Not found')}")
+
+        # Step 6: Return JobProvisioningData
+        return JobProvisioningData(
+            backend=instance_offer.backend,
+            instance_type=instance_offer.instance,
+            instance_id=vm_data["name"],  # Use VM name as instance_id
+            hostname=None,  # Set to None initially - will be set by update_provisioning_data
+            internal_ip=None,
+            region=instance_offer.region,
+            price=instance_offer.price,
+            username="hotaisle",  # Hotaisle username
+            ssh_port=vm_data["ssh_access"]["port"],  # Use port from response
+            dockerized=True,
+            ssh_proxy=None,
+            backend_data=vm_data[
+                "ip_address"
+            ],  # Store IP in backend_data for update_provisioning_data
+        )
+
+    def _upload_ssh_key_to_hotaisle(self, public_key: str) -> bool:
+        """Upload SSH public key to Hotaisle user account"""
+        import requests
+
+        # Use credentials from config
+        api_key = self.config.creds.api_key
+
+        url = "https://admin.hotaisle.app/api/user/ssh_keys/"
+        headers = {
+            "accept": "application/json",
+            "Authorization": api_key,
+            "Content-Type": "application/json",
+        }
+
+        payload = {"authorized_key": public_key}
+
+        print("Uploading SSH key to Hotaisle...")
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+
+            if response.status_code in [200, 201]:
+                print("SSH key uploaded successfully!")
+                return True
+            elif response.status_code == 409:
+                print("SSH key already exists in Hotaisle account - continuing...")
+                return True  # This is success - key already exists
+            else:
+                print(f"SSH key upload failed. Status: {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
+
+        except Exception as e:
+            print(f"SSH key upload exception: {e}")
+            return False
+
+    def update_provisioning_data(
+        self,
+        provisioning_data: JobProvisioningData,
+        project_ssh_public_key: str,
+        project_ssh_private_key: str,
+    ):
+        # Check Hotaisle VM state directly
+        vm_state = self._check_hotaisle_vm_state(provisioning_data.instance_id)
+        if vm_state == "running":
+            # Set hostname from backend_data now that VM is ready
+            if provisioning_data.hostname is None and provisioning_data.backend_data:
+                provisioning_data.hostname = provisioning_data.backend_data
+                print(
+                    f"Hotaisle VM {provisioning_data.instance_id} is running at {provisioning_data.hostname}"
+                )
+
+            # Ensure SSH key is uploaded and accessible for this VM
+            print(f"Ensuring SSH key is available for VM {provisioning_data.instance_id}...")
+            self._ensure_ssh_key_available(
+                project_ssh_public_key, provisioning_data.hostname, project_ssh_private_key
+            )
+
+            # Get shim commands and start installation
+            commands = get_shim_commands(
+                authorized_keys=[project_ssh_public_key],
+                arch=provisioning_data.instance_type.resources.cpu_arch,
+            )
+            # shim is assumed to be run under root
+            launch_command = "sudo sh -c " + shlex.quote(" && ".join(commands))
+            print(f"Launching shim installation with command: {launch_command}")
+            # Start shim installation in background thread
+            thread = Thread(
+                target=_start_runner,
+                kwargs={
+                    "hostname": provisioning_data.hostname,
+                    "project_ssh_private_key": project_ssh_private_key,
+                    "launch_command": launch_command,
+                },
+                daemon=True,
+            )
+            thread.start()
+        else:
+            print(f"Hotaisle VM {provisioning_data.instance_id} not ready yet, state: {vm_state}")
+
+    def _check_hotaisle_vm_state(self, vm_name: str) -> str:
+        """Check Hotaisle VM state using the state API"""
+        import requests
+
+        # Use credentials from config
+        api_key = self.config.creds.api_key
+        team_handle = self.config.team_handle
+
+        url = (
+            f"https://admin.hotaisle.app/api/teams/{team_handle}/virtual_machines/{vm_name}/state/"
+        )
+        headers = {
+            "accept": "application/json",
+            "Authorization": api_key,
+        }
+
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+
+            if response.status_code == 200:
+                state_data = response.json()
+                vm_state = state_data.get("state", "unknown")
+                print(f"Hotaisle VM {vm_name} state: {vm_state}")
+                return vm_state
+            else:
+                print(
+                    f"Failed to get VM state. Status: {response.status_code}, Response: {response.text}"
+                )
+                return "unknown"
+
+        except Exception as e:
+            print(f"Exception checking VM state: {e}")
+            return "unknown"
+
+    def _ensure_ssh_key_available(self, public_key: str, hostname: str, private_key: str) -> bool:
+        """Ensure SSH key is available on the VM, with retries and re-upload if needed"""
+        import time
+
+        max_retries = 3
+        retry_delay = 10  # seconds
+
+        for attempt in range(max_retries):
+            print(f"Testing SSH access to {hostname} (attempt {attempt + 1}/{max_retries})...")
+
+            # Test SSH access
+            with tempfile.NamedTemporaryFile("w+", 0o600) as f:
+                f.write(private_key)
+                f.flush()
+                result = subprocess.run(
+                    [
+                        "ssh",
+                        "-o",
+                        "ConnectTimeout=10",
+                        "-o",
+                        "StrictHostKeyChecking=no",
+                        "-i",
+                        f.name,
+                        f"hotaisle@{hostname}",
+                        "echo 'SSH access successful'",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+
+            if result.returncode == 0:
+                print(f"SSH access to {hostname} successful!")
+                return True
+            else:
+                print(f"SSH access failed: {result.stderr}")
+
+            if attempt < max_retries - 1:
+                # Re-upload SSH key and wait before retry
+                print(f"Re-uploading SSH key and waiting {retry_delay} seconds before retry...")
+                self._upload_ssh_key_to_hotaisle(public_key)
+                time.sleep(retry_delay)
+
+        print(f"Failed to establish SSH access to {hostname} after {max_retries} attempts")
         return False
+
+    def terminate_instance(
+        self, instance_id: str, region: str, backend_data: Optional[str] = None
+    ):
+        """Terminate Hotaisle VM instance"""
+        import requests
+
+        # Use credentials from config
+        api_key = self.config.creds.api_key
+        team_handle = self.config.team_handle
+
+        # instance_id contains the VM name from Hotaisle
+        vm_name = instance_id
+        url = f"https://admin.hotaisle.app/api/teams/{team_handle}/virtual_machines/{vm_name}/"
+        headers = {
+            "accept": "application/json",
+            "Authorization": api_key,
+        }
+
+        print(f"Terminating Hotaisle VM: {vm_name}")
+
+        try:
+            response = requests.delete(url, headers=headers, timeout=30)
+
+            if response.status_code in [200, 204]:
+                print(f"Hotaisle VM {vm_name} terminated successfully!")
+            elif response.status_code == 404:
+                print(f"Hotaisle VM {vm_name} not found (may already be terminated)")
+            else:
+                print(f"Failed to terminate VM {vm_name}. Status: {response.status_code}")
+                print(f"Response: {response.text}")
+                raise Exception(f"VM termination failed: {response.status_code} - {response.text}")
+
+        except requests.RequestException as e:
+            print(f"Network error while terminating VM {vm_name}: {e}")
+            raise Exception(f"Network error during VM termination: {e}")
+        except Exception as e:
+            print(f"Unexpected error while terminating VM {vm_name}: {e}")
+            raise
+
+    def _get_offers_with_availability(
+        self, offers: List[InstanceOffer]
+    ) -> List[InstanceOfferWithAvailability]:
+        # For online providers like Hotaisle, we assume all offers are available
+        # since gpuhunt fetches them dynamically
+        return [
+            InstanceOfferWithAvailability(
+                **offer.dict(), availability=InstanceAvailability.AVAILABLE
+            )
+            for offer in offers
+        ]
+
+
+def _start_runner(
+    hostname: str,
+    project_ssh_private_key: str,
+    launch_command: str,
+):
+    _setup_instance(
+        hostname=hostname,
+        ssh_private_key=project_ssh_private_key,
+    )
+    _launch_runner(
+        hostname=hostname,
+        ssh_private_key=project_ssh_private_key,
+        launch_command=launch_command,
+    )
+
+
+def _setup_instance(
+    hostname: str,
+    ssh_private_key: str,
+):
+    # Use simplified setup commands for Hotaisle (no NVIDIA toolkit needed for AMD GPUs)
+    setup_commands = (
+        "mkdir -p /home/hotaisle/.dstack",  # Changed to hotaisle home directory
+        "sudo mkdir -p /root/.dstack",  # Also create root directory for shim
+        "sudo apt-get update",  # Just update packages
+    )
+    _run_ssh_command(
+        hostname=hostname, ssh_private_key=ssh_private_key, command=" && ".join(setup_commands)
+    )
+
+
+def _launch_runner(
+    hostname: str,
+    ssh_private_key: str,
+    launch_command: str,
+):
+    _run_ssh_command(
+        hostname=hostname,
+        ssh_private_key=ssh_private_key,
+        command=launch_command,
+    )
 
 
 def _run_ssh_command(hostname: str, ssh_private_key: str, command: str):
-    """Run SSH command on Hotaisle VM"""
     with tempfile.NamedTemporaryFile("w+", 0o600) as f:
         f.write(ssh_private_key)
         f.flush()
-        result = subprocess.run(
+        subprocess.run(
             [
                 "ssh",
                 "-F",
@@ -62,456 +429,6 @@ def _run_ssh_command(hostname: str, ssh_private_key: str, command: str):
                 f"hotaisle@{hostname}",
                 command,
             ],
-            capture_output=True,
-            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-
-        if result.returncode != 0:
-            print(f"SSH command failed: {result.stderr}")
-        else:
-            print("SSH command completed successfully")
-
-        return result
-
-
-def run_setup_commands(hostname: str, ssh_private_key: str):
-    """Run basic setup commands on Hotaisle VM"""
-    setup_commands = (
-        "mkdir -p /home/hotaisle/.dstack",
-        "sudo apt-get update",
-    )
-
-    print(f"Running setup commands on {hostname}...")
-    combined_command = " && ".join(setup_commands)
-    result = _run_ssh_command(hostname, ssh_private_key, combined_command)
-
-    if result.returncode == 0:
-        print("Setup commands completed successfully!")
-    else:
-        print("Setup commands failed!")
-
-    return result.returncode == 0
-
-
-def get_simplified_shim_commands(authorized_keys: list[str], arch: str = "amd64") -> list[str]:
-    """Fallback simplified shim commands if real ones not available"""
-    dstack_runner_url = f"https://dstack-runner-downloads.s3.eu-west-1.amazonaws.com/latest/binaries/dstack-runner-linux-{arch}"
-
-    commands = [
-        f"sudo curl -L -o /usr/local/bin/dstack-runner {dstack_runner_url}",
-        "sudo chmod +x /usr/local/bin/dstack-runner",
-        "sudo mkdir -p /root/.dstack",
-        f"echo '{chr(10).join(authorized_keys)}' | sudo tee /root/.ssh/authorized_keys",
-        "sudo chmod 600 /root/.ssh/authorized_keys",
-        "sudo nohup /usr/local/bin/dstack-runner --log-level 6 start --http-port 10999 --ssh-port 10022 --temp-dir /tmp/runner --home-dir /root --working-dir /root > /dev/null 2>&1 &",
-    ]
-
-    return commands
-
-
-def run_dstack_runner(
-    hostname: str, ssh_private_key: str, public_key: str, use_real_shim: bool = True
-):
-    """Start dstack runner on Hotaisle VM using REAL or simplified shim commands"""
-    print(f"Starting dstack runner on {hostname}...")
-
-    if use_real_shim and REAL_SHIM_AVAILABLE:
-        print("Using REAL dstack shim commands...")
-        # Use the actual dstack shim commands with proper parameters
-        commands = get_shim_commands(
-            authorized_keys=[public_key],
-            arch="amd64",  # AMD64 architecture for Hotaisle VMs
-            is_privileged=False,
-            pjrt_device=None,
-            base_path="/home/hotaisle",  # Use hotaisle home directory
-            bin_path=None,
-            backend_shim_env=None,
-        )
-    else:
-        print("Using simplified shim commands...")
-        commands = get_simplified_shim_commands(authorized_keys=[public_key])
-
-    # Combine commands like Lambda Labs does
-    launch_command = "sudo sh -c " + shlex.quote(" && ".join(commands))
-
-    print(f"Generated {len(commands)} shim commands")
-    print(f"First few commands: {commands[:3] if len(commands) > 3 else commands}")
-
-    # Run in background thread
-    thread = Thread(
-        target=_start_runner,
-        kwargs={
-            "hostname": hostname,
-            "ssh_private_key": ssh_private_key,
-            "launch_command": launch_command,
-        },
-        daemon=True,
-    )
-    thread.start()
-    print("dstack runner startup initiated in background...")
-
-
-def _start_runner(hostname: str, ssh_private_key: str, launch_command: str):
-    """Start dstack runner (mimics Lambda Labs pattern)"""
-    print(f"Executing runner setup on {hostname}...")
-    result = _run_ssh_command(hostname, ssh_private_key, launch_command)
-
-    if result.returncode == 0:
-        print(f"dstack runner started successfully on {hostname}")
-    else:
-        print(f"dstack runner startup failed on {hostname}")
-        print(f"Error: {result.stderr}")
-
-
-def create_hotaisle_instance(
-    api_key: str,
-    team_name: str,
-    cpu_cores: int,
-    ram_gb: int,
-    disk_gb: int,
-    gpu_model: str = "MI300X",
-    gpu_count: int = 1,
-    ssh_public_key: str = None,
-    ssh_private_key: str = None,
-    start_runner: bool = False,
-    use_real_shim: bool = True,  # New parameter
-) -> Dict[str, Any]:
-    """Create a Hotaisle VM instance with SSH key setup and optional dstack runner"""
-
-    # Step 1: Upload SSH key if provided
-    if ssh_public_key:
-        if not upload_ssh_key_to_hotaisle(api_key, ssh_public_key):
-            raise Exception("Failed to upload SSH key to Hotaisle")
-
-    # Step 2: Create VM
-    url = f"https://admin.hotaisle.app/api/teams/{team_name}/virtual_machines/"
-
-    headers = {
-        "accept": "application/json",
-        "Authorization": api_key,
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "cpu_cores": 13,
-        "cpus": {
-            "count": 1,
-            "manufacturer": "Intel",
-            "model": "Xeon Platinum 8470",
-            "cores": 13,
-            "frequency": 2600000000,
-        },
-        "disk_capacity": 13194139533312,
-        "ram_capacity": 240518168576,
-        "gpus": [{"count": gpu_count, "manufacturer": "AMD", "model": gpu_model}],
-    }
-
-    print("Creating Hotaisle VM...")
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
-
-    if response.status_code in [200, 201]:
-        vm_data = response.json()
-        print("VM created successfully!")
-        print(f"VM Name: {vm_data['name']}")
-        print(f"IP Address: {vm_data['ip_address']}")
-
-        # Step 3: Run setup commands
-        if ssh_private_key:
-            print("\nRunning setup commands...")
-            success = run_setup_commands(vm_data["ip_address"], ssh_private_key)
-            if not success:
-                print("Warning: Setup commands failed, but continuing...")
-
-            # Step 4: Start dstack runner if requested
-            if start_runner and ssh_public_key:
-                print("\nStarting dstack runner...")
-                run_dstack_runner(
-                    hostname=vm_data["ip_address"],
-                    ssh_private_key=ssh_private_key,
-                    public_key=ssh_public_key,
-                    use_real_shim=use_real_shim,
-                )
-
-        return vm_data
-    else:
-        print(f"Failed to create VM. Status: {response.status_code}")
-        print(f"Response: {response.text}")
-        raise Exception(f"VM creation failed: {response.status_code} - {response.text}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Create a Hotaisle VM instance with dstack runner"
-    )
-    parser.add_argument("--api_key", required=True, help="Hotaisle API key")
-    parser.add_argument("--team_name", default="dstackai", help="Team name (default: dstackai)")
-    parser.add_argument("--ssh_public_key", help="SSH public key to upload")
-    parser.add_argument("--ssh_private_key_file", help="SSH private key file for setup commands")
-    parser.add_argument("--start_runner", action="store_true", help="Start dstack runner on VM")
-    parser.add_argument(
-        "--use_real_shim",
-        action="store_true",
-        default=True,
-        help="Use real dstack shim commands (default: True)",
-    )
-    parser.add_argument(
-        "--use_simplified_shim",
-        action="store_true",
-        help="Use simplified shim commands instead of real ones",
-    )
-
-    args = parser.parse_args()
-
-    # Default dstack SSH keys
-    default_ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC1FHT9bAq53ev9Pte2jYFt6VIP450JALUeNHI7gptlpqpzqkqNjQB0di/QaQMj+2LURV3Lo1Qx5gHyqs+J3t16U7/P0if077pK5jBwPzXySwKenbHg7HDycLuRX+JY3ALsqZL8r5u2DtsEHd+YrIVQ8n3/zRdXxUln9+X4bS3/D/BeKwoBmxYachVf8r/8rdwk/7Kj39bnJ+mn8hY2/VqMIGaYkQd3cO2Zgbg3DOjeX+PwotPCmnEiKG3BxXDUlvlO30ZQ/UTCqsoTdlTMMUASh4lI1eeW5azYlZggE0MVI7O8Bju+VY1pNhyeX7CzKoC4MPB0i3qUtVmGrUFvnx2f dstack"
-
-    # Read private key if file provided
-    ssh_private_key = None
-    if args.ssh_private_key_file:
-        with open(args.ssh_private_key_file, "r") as f:
-            ssh_private_key = f.read()
-
-    ssh_public_key = args.ssh_public_key or default_ssh_public_key
-    use_real_shim = not args.use_simplified_shim
-
-    print(
-        f"Testing Hotaisle VM creation with {'REAL' if use_real_shim else 'SIMPLIFIED'} dstack shim..."
-    )
-
-    try:
-        vm_result = create_hotaisle_instance(
-            api_key=args.api_key,
-            team_name=args.team_name,
-            cpu_cores=13,
-            ram_gb=224,
-            disk_gb=12800,
-            ssh_public_key=ssh_public_key,
-            ssh_private_key=ssh_private_key,
-            start_runner=args.start_runner,
-            use_real_shim=use_real_shim,
-        )
-
-        print("\nSuccess! VM is ready:")
-        print(f"ssh hotaisle@{vm_result['ip_address']}")
-
-        if args.start_runner:
-            print("dstack runner should be starting...")
-
-    except Exception as e:
-        print(f"Error: {e}")
-
-
-# import argparse
-# import subprocess
-# import tempfile
-# from typing import Any, Dict
-
-# import requests
-
-
-# def upload_ssh_key_to_hotaisle(api_key: str, public_key: str) -> bool:
-#     """Upload SSH public key to Hotaisle user account"""
-#     url = "https://admin.hotaisle.app/api/user/ssh_keys/"
-
-#     headers = {
-#         "accept": "application/json",
-#         "Authorization": api_key,
-#         "Content-Type": "application/json",
-#     }
-
-#     payload = {
-#         "authorized_key": public_key
-#     }
-
-#     print("Uploading SSH key to Hotaisle...")
-#     response = requests.post(url, headers=headers, json=payload, timeout=30)
-
-#     if response.status_code in [200, 201]:
-#         print("SSH key uploaded successfully!")
-#         return True
-#     elif response.status_code == 409:
-#         print("SSH key already exists in Hotaisle account - skipping upload")
-#         return True  # This is actually success - key is already there
-#     else:
-#         print(f"SSH key upload failed. Status: {response.status_code}")
-#         print(f"Response: {response.text}")
-#         return False
-
-
-# def _run_ssh_command(hostname: str, ssh_private_key: str, command: str):
-#     """Run SSH command on Hotaisle VM"""
-#     with tempfile.NamedTemporaryFile("w+", 0o600) as f:
-#         f.write(ssh_private_key)
-#         f.flush()
-#         result = subprocess.run(
-#             [
-#                 "ssh",
-#                 "-F",
-#                 "none",
-#                 "-o",
-#                 "StrictHostKeyChecking=no",
-#                 "-i",
-#                 f.name,
-#                 f"hotaisle@{hostname}",  # Use hotaisle username
-#                 command,
-#             ],
-#             capture_output=True,
-#             text=True,
-#         )
-
-#         if result.returncode != 0:
-#             print(f"SSH command failed: {result.stderr}")
-#         else:
-#             print(f"SSH command completed successfully")
-
-#         return result
-
-
-# def run_setup_commands(hostname: str, ssh_private_key: str):
-#     """Run basic setup commands on Hotaisle VM"""
-#     setup_commands = (
-#         "mkdir -p /home/hotaisle/.dstack",  # Changed to hotaisle home directory
-#         "sudo apt-get update",              # Just update packages
-#     )
-
-#     print(f"Running setup commands on {hostname}...")
-#     combined_command = " && ".join(setup_commands)
-#     result = _run_ssh_command(hostname, ssh_private_key, combined_command)
-
-#     if result.returncode == 0:
-#         print("Setup commands completed successfully!")
-#     else:
-#         print("Setup commands failed!")
-
-#     return result.returncode == 0
-
-
-# def create_hotaisle_instance(
-#     api_key: str,
-#     team_name: str,
-#     cpu_cores: int,
-#     ram_gb: int,
-#     disk_gb: int,
-#     gpu_model: str = "MI300X",
-#     gpu_count: int = 1,
-#     ssh_public_key: str = None,
-#     ssh_private_key: str = None,
-# ) -> Dict[str, Any]:
-#     """
-#     Create a Hotaisle VM instance with SSH key setup and basic configuration
-
-#     Args:
-#         api_key: Hotaisle authorization key
-#         team_name: Team name (e.g., 'dstackai')
-#         cpu_cores: Number of CPU cores
-#         ram_gb: RAM in GB
-#         disk_gb: Disk size in GB
-#         gpu_model: GPU model (default: MI300X)
-#         gpu_count: Number of GPUs (default: 1)
-#         ssh_public_key: SSH public key to upload (optional)
-#         ssh_private_key: SSH private key for setup commands (optional)
-
-#     Returns:
-#         VM response dict with name, ip_address, ssh_access, etc.
-#     """
-
-#     # Step 1: Upload SSH key if provided
-#     if ssh_public_key:
-#         if not upload_ssh_key_to_hotaisle(api_key, ssh_public_key):
-#             raise Exception("Failed to upload SSH key to Hotaisle")
-
-#     # Step 2: Create VM
-#     url = f"https://admin.hotaisle.app/api/teams/{team_name}/virtual_machines/"
-
-#     headers = {
-#         "accept": "application/json",
-#         "Authorization": api_key,
-#         "Content-Type": "application/json",
-#     }
-
-#     payload = {
-#         "cpu_cores": 13,
-#         "cpus": {
-#             "count": 1,
-#             "manufacturer": "Intel",
-#             "model": "Xeon Platinum 8470",
-#             "cores": 13,
-#             "frequency": 2600000000,
-#         },
-#         "disk_capacity": 13194139533312,  # Exact value from working curl
-#         "ram_capacity": 240518168576,  # Exact value from working curl
-#         "gpus": [{"count": gpu_count, "manufacturer": "AMD", "model": gpu_model}],
-#     }
-
-#     print("Creating Hotaisle VM...")
-#     print(f"URL: {url}")
-#     print(f"Payload: {payload}")
-
-#     response = requests.post(url, headers=headers, json=payload, timeout=60)
-
-#     if response.status_code == 200 or response.status_code == 201:
-#         vm_data = response.json()
-#         print("VM created successfully!")
-#         print(f"VM Name: {vm_data['name']}")
-#         print(f"IP Address: {vm_data['ip_address']}")
-#         print(f"SSH: hotaisle@{vm_data['ip_address']}")
-
-#         # Step 3: Run setup commands if private key provided
-#         if ssh_private_key:
-#             print("\nRunning setup commands...")
-#             success = run_setup_commands(vm_data['ip_address'], ssh_private_key)
-#             if not success:
-#                 print("Warning: Setup commands failed, but VM was created successfully")
-
-#         return vm_data
-#     else:
-#         print(f"Failed to create VM. Status: {response.status_code}")
-#         print(f"Response: {response.text}")
-#         raise Exception(f"VM creation failed: {response.status_code} - {response.text}")
-
-
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser(description="Create a Hotaisle VM instance with setup")
-#     parser.add_argument("--api_key", required=True, help="Hotaisle API key")
-#     parser.add_argument("--team_name", default="dstackai", help="Team name (default: dstackai)")
-#     parser.add_argument("--cpu_cores", type=int, default=13, help="Number of CPU cores (default: 13)")
-#     parser.add_argument("--ram_gb", type=int, default=224, help="RAM in GB (default: 224)")
-#     parser.add_argument("--disk_gb", type=int, default=12800, help="Disk size in GB (default: 12800)")
-#     parser.add_argument("--gpu_model", default="MI300X", help="GPU model (default: MI300X)")
-#     parser.add_argument("--gpu_count", type=int, default=1, help="Number of GPUs (default: 1)")
-#     parser.add_argument("--ssh_public_key", help="SSH public key to upload")
-#     parser.add_argument("--ssh_private_key_file", help="SSH private key file for setup commands")
-
-#     args = parser.parse_args()
-
-#     # Default dstack SSH keys
-#     default_ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC1FHT9bAq53ev9Pte2jYFt6VIP450JALUeNHI7gptlpqpzqkqNjQB0di/QaQMj+2LURV3Lo1Qx5gHyqs+J3t16U7/P0if077pK5jBwPzXySwKenbHg7HDycLuRX+JY3ALsqZL8r5u2DtsEHd+YrIVQ8n3/zRdXxUln9+X4bS3/D/BeKwoBmxYachVf8r/8rdwk/7Kj39bnJ+mn8hY2/VqMIGaYkQd3cO2Zgbg3DOjeX+PwotPCmnEiKG3BxXDUlvlO30ZQ/UTCqsoTdlTMMUASh4lI1eeW5azYlZggE0MVI7O8Bju+VY1pNhyeX7CzKoC4MPB0i3qUtVmGrUFvnx2f dstack"
-
-#     # Read private key if file provided
-#     ssh_private_key = None
-#     if args.ssh_private_key_file:
-#         with open(args.ssh_private_key_file, 'r') as f:
-#             ssh_private_key = f.read()
-
-#     ssh_public_key = args.ssh_public_key or default_ssh_public_key
-
-#     print("Testing Hotaisle VM creation with SSH setup...")
-
-#     try:
-#         vm_result = create_hotaisle_instance(
-#             api_key=args.api_key,
-#             team_name=args.team_name,
-#             cpu_cores=args.cpu_cores,
-#             ram_gb=args.ram_gb,
-#             disk_gb=args.disk_gb,
-#             gpu_model=args.gpu_model,
-#             gpu_count=args.gpu_count,
-#             ssh_public_key=ssh_public_key,
-#             ssh_private_key=ssh_private_key,
-#         )
-
-#         print("\nSuccess! VM is ready:")
-#         print(f"ssh hotaisle@{vm_result['ip_address']}")
-
-#     except Exception as e:
-#         print(f"Error: {e}")

@@ -14,11 +14,12 @@ from dstack._internal.core.models.envs import Env
 from dstack._internal.core.models.files import FilePathMapping
 from dstack._internal.core.models.fleets import FleetConfiguration
 from dstack._internal.core.models.gateways import GatewayConfiguration
-from dstack._internal.core.models.profiles import ProfileParams, parse_off_duration
+from dstack._internal.core.models.profiles import ProfileParams, parse_duration, parse_off_duration
 from dstack._internal.core.models.resources import Range, ResourcesSpec
 from dstack._internal.core.models.services import AnyModel, OpenAIChatModel
 from dstack._internal.core.models.unix import UnixUser
 from dstack._internal.core.models.volumes import MountPoint, VolumeConfiguration, parse_mount_point
+from dstack._internal.utils.common import has_duplicates
 from dstack._internal.utils.json_utils import (
     pydantic_orjson_dumps_with_indent,
 )
@@ -32,6 +33,14 @@ RUN_PRIOTIRY_MIN = 0
 RUN_PRIOTIRY_MAX = 100
 RUN_PRIORITY_DEFAULT = 0
 DEFAULT_REPO_DIR = "/workflow"
+MIN_PROBE_TIMEOUT = 1
+MIN_PROBE_INTERVAL = 1
+DEFAULT_PROBE_URL = "/"
+DEFAULT_PROBE_TIMEOUT = 10
+DEFAULT_PROBE_INTERVAL = 15
+DEFAULT_PROBE_READY_AFTER = 1
+DEFAULT_PROBE_METHOD = "get"
+MAX_PROBE_URL_LEN = 2048
 
 
 class RunConfigurationType(str, Enum):
@@ -160,6 +169,121 @@ class RateLimit(CoreModel):
             ),
         ),
     ] = 0
+
+
+HTTPMethod = Literal["get", "post", "put", "delete", "patch", "head"]
+
+
+class HTTPHeaderSpec(CoreModel):
+    name: Annotated[
+        str,
+        Field(
+            description="The name of the HTTP header",
+            min_length=1,
+            max_length=256,
+        ),
+    ]
+    value: Annotated[
+        str,
+        Field(
+            description="The value of the HTTP header",
+            min_length=1,
+            max_length=2048,
+        ),
+    ]
+
+
+class ProbeConfig(CoreModel):
+    type: Literal["http"]  # expect other probe types in the future, namely `exec`
+    url: Annotated[
+        Optional[str], Field(description=f"The URL to request. Defaults to `{DEFAULT_PROBE_URL}`")
+    ] = None
+    method: Annotated[
+        Optional[HTTPMethod],
+        Field(
+            description=(
+                "The HTTP method to use for the probe (e.g., `get`, `post`, etc.)."
+                f" Defaults to `{DEFAULT_PROBE_METHOD}`"
+            )
+        ),
+    ] = None
+    headers: Annotated[
+        list[HTTPHeaderSpec],
+        Field(description="A list of HTTP headers to include in the request", max_items=16),
+    ] = []
+    body: Annotated[
+        Optional[str],
+        Field(
+            description="The HTTP request body to send with the probe",
+            min_length=1,
+            max_length=2048,
+        ),
+    ] = None
+    timeout: Annotated[
+        Optional[Union[int, str]],
+        Field(
+            description=(
+                f"Maximum amount of time the HTTP request is allowed to take. Defaults to `{DEFAULT_PROBE_TIMEOUT}s`"
+            )
+        ),
+    ] = None
+    interval: Annotated[
+        Optional[Union[int, str]],
+        Field(
+            description=(
+                "Minimum amount of time between the end of one probe execution"
+                f" and the start of the next. Defaults to `{DEFAULT_PROBE_INTERVAL}s`"
+            )
+        ),
+    ] = None
+    ready_after: Annotated[
+        Optional[int],
+        Field(
+            ge=1,
+            description=(
+                "The number of consecutive successful probe executions required for the replica"
+                " to be considered ready. Used during rolling deployments."
+                f" Defaults to `{DEFAULT_PROBE_READY_AFTER}`"
+            ),
+        ),
+    ] = None
+
+    @validator("timeout")
+    def parse_timeout(cls, v: Optional[Union[int, str]]) -> Optional[int]:
+        if v is None:
+            return v
+        parsed = parse_duration(v)
+        if parsed < MIN_PROBE_TIMEOUT:
+            raise ValueError(f"Probe timeout cannot be shorter than {MIN_PROBE_TIMEOUT}s")
+        return parsed
+
+    @validator("interval")
+    def parse_interval(cls, v: Optional[Union[int, str]]) -> Optional[int]:
+        if v is None:
+            return v
+        parsed = parse_duration(v)
+        if parsed < MIN_PROBE_INTERVAL:
+            raise ValueError(f"Probe interval cannot be shorter than {MIN_PROBE_INTERVAL}s")
+        return parsed
+
+    @validator("url")
+    def validate_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.startswith("/"):
+            raise ValueError("Must start with `/`")
+        if len(v) > MAX_PROBE_URL_LEN:
+            raise ValueError(f"Cannot be longer than {MAX_PROBE_URL_LEN} characters")
+        if not v.isprintable():
+            raise ValueError("Cannot contain non-printable characters")
+        return v
+
+    @root_validator
+    def validate_body_matches_method(cls, values):
+        method: HTTPMethod = values["method"]
+        if values["body"] is not None and method in ["get", "head"]:
+            raise ValueError(f"Cannot set request body for the `{method}` method")
+        return values
 
 
 class BaseRunConfiguration(CoreModel):
@@ -448,6 +572,10 @@ class ServiceConfigurationParams(CoreModel):
         Field(description="The auto-scaling rules. Required if `replicas` is set to a range"),
     ] = None
     rate_limits: Annotated[list[RateLimit], Field(description="Rate limiting rules")] = []
+    probes: Annotated[
+        list[ProbeConfig],
+        Field(description="List of probes used to determine job health"),
+    ] = []
 
     @validator("port")
     def convert_port(cls, v) -> PortMapping:
@@ -509,6 +637,16 @@ class ServiceConfigurationParams(CoreModel):
                 f"Prefixes {duplicates} are used more than once."
                 " Each rate limit should have a unique path prefix"
             )
+        return v
+
+    @validator("probes")
+    def validate_probes(cls, v: list[ProbeConfig]) -> list[ProbeConfig]:
+        if has_duplicates(v):
+            # Using a custom validator instead of Field(unique_items=True) to avoid Pydantic bug:
+            # https://github.com/pydantic/pydantic/issues/3765
+            # Because of the bug, our gen_schema_reference.py fails to determine the type of
+            # ServiceConfiguration.probes and insert the correct hyperlink.
+            raise ValueError("Probes must be unique")
         return v
 
 

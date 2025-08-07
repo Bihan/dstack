@@ -9,6 +9,7 @@ from dstack._internal.server.background.tasks.process_gateways import (
 )
 from dstack._internal.server.background.tasks.process_idle_volumes import process_idle_volumes
 from dstack._internal.server.background.tasks.process_instances import (
+    delete_instance_health_checks,
     process_instances,
 )
 from dstack._internal.server.background.tasks.process_metrics import (
@@ -18,6 +19,7 @@ from dstack._internal.server.background.tasks.process_metrics import (
 from dstack._internal.server.background.tasks.process_placement_groups import (
     process_placement_groups,
 )
+from dstack._internal.server.background.tasks.process_probes import process_probes
 from dstack._internal.server.background.tasks.process_prometheus_metrics import (
     collect_prometheus_metrics,
     delete_prometheus_metrics,
@@ -63,6 +65,7 @@ def start_background_tasks() -> AsyncIOScheduler:
     # that the first waiting for the lock will acquire it.
     # The jitter is needed to give all tasks a chance to acquire locks.
 
+    _scheduler.add_job(process_probes, IntervalTrigger(seconds=3, jitter=1))
     _scheduler.add_job(collect_metrics, IntervalTrigger(seconds=10), max_instances=1)
     _scheduler.add_job(delete_metrics, IntervalTrigger(minutes=5), max_instances=1)
     if settings.ENABLE_PROMETHEUS_METRICS:
@@ -84,6 +87,7 @@ def start_background_tasks() -> AsyncIOScheduler:
         IntervalTrigger(seconds=10, jitter=2),
         max_instances=1,
     )
+    _scheduler.add_job(delete_instance_health_checks, IntervalTrigger(minutes=5), max_instances=1)
     for replica in range(settings.SERVER_BACKGROUND_PROCESSING_FACTOR):
         # Add multiple copies of tasks if requested.
         # max_instances=1 for additional copies to avoid running too many tasks.

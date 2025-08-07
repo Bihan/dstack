@@ -7,6 +7,7 @@ import { Box, Button, Code, Container, Header, ListEmptyMessage, Loader, TextCon
 import { useLocalStorageState } from 'hooks/useLocalStorageState';
 import { useLazyGetProjectLogsQuery } from 'services/project';
 
+import { LogRow } from './components/LogRow';
 import { decodeLogs } from './helpers';
 
 import { IProps } from './types';
@@ -23,10 +24,11 @@ export const Logs: React.FC<IProps> = ({ className, projectName, runName, jobSub
     const scrollPositionByBottom = useRef<number>(0);
 
     const [logsData, setLogsData] = useState<ILogItem[]>([]);
+    const [externalLink, setExternalLink] = useState<string | undefined>();
     const [isLoading, setIsLoading] = useState(false);
     const [getProjectLogs] = useLazyGetProjectLogsQuery();
     const [isEnabledDecoding, setIsEnabledDecoding] = useLocalStorageState('enable-encode-logs', false);
-    // const [isShowTimestamp, setIsShowTimestamp] = useLocalStorageState('enable-showing-timestamp-logs', false);
+    const [isShowTimestamp, setIsShowTimestamp] = useLocalStorageState('enable-showing-timestamp-logs', false);
 
     const logsForView = useMemo(() => {
         if (isEnabledDecoding) {
@@ -84,6 +86,7 @@ export const Logs: React.FC<IProps> = ({ className, projectName, runName, jobSub
                     setLogsData((old) => [...reversed, ...old]);
                 } else {
                     setLogsData(reversed);
+                    setExternalLink(response.external_url);
                 }
 
                 nextTokenRef.current = response.next_token;
@@ -101,6 +104,10 @@ export const Logs: React.FC<IProps> = ({ className, projectName, runName, jobSub
     const toggleDecodeLogs = () => {
         saveScrollPositionByBottom();
         setIsEnabledDecoding(!isEnabledDecoding);
+    };
+
+    const toggleShowingTimestamp = () => {
+        setIsShowTimestamp(!isShowTimestamp);
     };
 
     useEffect(() => {
@@ -154,6 +161,10 @@ export const Logs: React.FC<IProps> = ({ className, projectName, runName, jobSub
                             <Header variant="h2">{t('projects.run.log')}</Header>
                         </div>
 
+                        {externalLink && (
+                            <Button target="_blank" formAction="none" iconName="external" href={externalLink} variant="icon" />
+                        )}
+
                         <Loader
                             show={isLoading && Boolean(logsForView.length)}
                             padding={'n'}
@@ -172,11 +183,15 @@ export const Logs: React.FC<IProps> = ({ className, projectName, runName, jobSub
                                 />
                             </Box>
 
-                            {/*<Box>*/}
-                            {/*    <Toggle onChange={({ detail }) => setIsShowTimestamp(detail.checked)} checked={isShowTimestamp}>*/}
-                            {/*        Show timestamp*/}
-                            {/*    </Toggle>*/}
-                            {/*</Box>*/}
+                            <Box>
+                                <Button
+                                    ariaLabel="Show timestamp"
+                                    formAction="none"
+                                    iconName="status-pending"
+                                    variant={isShowTimestamp ? 'primary' : 'icon'}
+                                    onClick={toggleShowingTimestamp}
+                                />
+                            </Box>
                         </div>
                     </div>
                 }
@@ -193,12 +208,13 @@ export const Logs: React.FC<IProps> = ({ className, projectName, runName, jobSub
 
                     {Boolean(logsForView.length) && (
                         <Code className={styles.terminal} ref={codeRef}>
-                            {logsForView.map((log, i) => (
-                                <p key={i}>
-                                    {/*{isShowTimestamp && <span className={styles.timestamp}>{log.timestamp}</span>}*/}
-                                    {log.message}
-                                </p>
-                            ))}
+                            <table>
+                                <tbody>
+                                    {logsForView.map((log, i) => (
+                                        <LogRow logItem={log} key={i} isShowTimestamp={isShowTimestamp} />
+                                    ))}
+                                </tbody>
+                            </table>
                         </Code>
                     )}
                 </TextContent>

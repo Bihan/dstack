@@ -28,6 +28,7 @@ from dstack._internal.core.models.backends.base import BackendType
 from dstack._internal.core.models.common import CoreModel
 from dstack._internal.core.models.fleets import FleetStatus
 from dstack._internal.core.models.gateways import GatewayStatus
+from dstack._internal.core.models.health import HealthStatus
 from dstack._internal.core.models.instances import InstanceStatus
 from dstack._internal.core.models.profiles import (
     DEFAULT_FLEET_TERMINATION_IDLE_TIME,
@@ -427,6 +428,9 @@ class JobModel(BaseModel):
     replica_num: Mapped[int] = mapped_column(Integer)
     deployment_num: Mapped[int] = mapped_column(Integer)
     job_runtime_data: Mapped[Optional[str]] = mapped_column(Text)
+    probes: Mapped[list["ProbeModel"]] = relationship(
+        back_populates="job", order_by="ProbeModel.probe_num"
+    )
 
 
 class GatewayModel(BaseModel):
@@ -596,7 +600,11 @@ class InstanceModel(BaseModel):
     # instance termination handling
     termination_deadline: Mapped[Optional[datetime]] = mapped_column(NaiveDateTime)
     termination_reason: Mapped[Optional[str]] = mapped_column(String(4000))
+    # Deprecated since 0.19.22, not used
     health_status: Mapped[Optional[str]] = mapped_column(String(4000))
+    health: Mapped[HealthStatus] = mapped_column(
+        EnumAsString(HealthStatus, 100), default=HealthStatus.HEALTHY
+    )
     first_termination_retry_at: Mapped[Optional[datetime]] = mapped_column(NaiveDateTime)
     last_termination_retry_at: Mapped[Optional[datetime]] = mapped_column(NaiveDateTime)
 
@@ -625,6 +633,21 @@ class InstanceModel(BaseModel):
         # SQLAlchemy requires delete when using delete-orphan.
         cascade="save-update, merge, delete-orphan, delete",
     )
+
+
+class InstanceHealthCheckModel(BaseModel):
+    __tablename__ = "instance_health_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType(binary=False), primary_key=True, default=uuid.uuid4
+    )
+
+    instance_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instances.id"))
+    instance: Mapped["InstanceModel"] = relationship()
+
+    collected_at: Mapped[datetime] = mapped_column(NaiveDateTime)
+    status: Mapped[HealthStatus] = mapped_column(EnumAsString(HealthStatus, 100))
+    response: Mapped[str] = mapped_column(Text)
 
 
 class VolumeModel(BaseModel):
@@ -727,6 +750,24 @@ class JobPrometheusMetrics(BaseModel):
     collected_at: Mapped[datetime] = mapped_column(NaiveDateTime)
     # Raw Prometheus text response
     text: Mapped[str] = mapped_column(Text)
+
+
+class ProbeModel(BaseModel):
+    __tablename__ = "probes"
+    __table_args__ = (UniqueConstraint("job_id", "probe_num", name="uq_probes_job_id_probe_num"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType(binary=False), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(String(100))
+
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"), primary_key=True)
+    job: Mapped["JobModel"] = relationship(back_populates="probes")
+
+    probe_num: Mapped[int] = mapped_column(Integer)  # index in JobSpec.probes
+    due: Mapped[datetime] = mapped_column(NaiveDateTime)
+    success_streak: Mapped[int] = mapped_column(BigInteger)
+    active: Mapped[bool] = mapped_column(Boolean)
 
 
 class SecretModel(BaseModel):

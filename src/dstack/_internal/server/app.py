@@ -13,6 +13,7 @@ from fastapi.datastructures import URL
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Histogram
+from sentry_sdk.types import SamplingContext
 
 from dstack._internal.cli.utils.common import console
 from dstack._internal.core.errors import ForbiddenError, ServerClientError
@@ -21,6 +22,7 @@ from dstack._internal.proxy.lib.deps import get_injector_from_app
 from dstack._internal.proxy.lib.routers import model_proxy
 from dstack._internal.server import settings
 from dstack._internal.server.background import start_background_tasks
+from dstack._internal.server.background.tasks.process_probes import PROBES_SCHEDULER
 from dstack._internal.server.db import get_db, get_session_ctx, migrate
 from dstack._internal.server.routers import (
     backends,
@@ -81,16 +83,6 @@ REQUEST_DURATION = Histogram(
 
 
 def create_app() -> FastAPI:
-    if settings.SENTRY_DSN is not None:
-        sentry_sdk.init(
-            dsn=settings.SENTRY_DSN,
-            release=DSTACK_VERSION,
-            environment=settings.SERVER_ENVIRONMENT,
-            enable_tracing=True,
-            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
-            profiles_sample_rate=settings.SENTRY_PROFILES_SAMPLE_RATE,
-        )
-
     app = FastAPI(
         docs_url="/api/docs",
         lifespan=lifespan,
@@ -102,6 +94,15 @@ def create_app() -> FastAPI:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    if settings.SENTRY_DSN is not None:
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            release=DSTACK_VERSION,
+            environment=settings.SERVER_ENVIRONMENT,
+            enable_tracing=True,
+            traces_sampler=_sentry_traces_sampler,
+            profiles_sample_rate=settings.SENTRY_PROFILES_SAMPLE_RATE,
+        )
     server_executor = ThreadPoolExecutor(max_workers=settings.SERVER_EXECUTOR_MAX_WORKERS)
     asyncio.get_running_loop().set_default_executor(server_executor)
     await migrate()
@@ -155,6 +156,7 @@ async def lifespan(app: FastAPI):
         scheduler = start_background_tasks()
     else:
         logger.info("Background processing is disabled")
+    PROBES_SCHEDULER.start()
     dstack_version = DSTACK_VERSION if DSTACK_VERSION else "(no version)"
     logger.info(f"The admin token is {admin.token.get_plaintext_or_error()}", {"show_path": False})
     logger.info(
@@ -166,6 +168,7 @@ async def lifespan(app: FastAPI):
     yield
     if settings.SERVER_BACKGROUND_PROCESSING_ENABLED:
         scheduler.shutdown()
+    PROBES_SCHEDULER.shutdown(wait=False)
     await gateway_connections_pool.remove_all()
     service_conn_pool = await get_injector_from_app(app).get_service_connection_pool()
     await service_conn_pool.remove_all()
@@ -197,6 +200,7 @@ def register_routes(app: FastAPI, ui: bool = True):
     app.include_router(fleets.root_router)
     app.include_router(fleets.project_router)
     app.include_router(instances.root_router)
+    app.include_router(instances.project_router)
     app.include_router(repos.router)
     app.include_router(runs.root_router)
     app.include_router(runs.project_router)
@@ -379,3 +383,15 @@ def _print_dstack_logo():
 ╰━━┻━━┻╯╱╰╯╰━━┻╯
 [/]"""
     )
+
+
+def _sentry_traces_sampler(sampling_context: SamplingContext) -> float:
+    parent_sampling_decision = sampling_context["parent_sampled"]
+    if parent_sampling_decision is not None:
+        return float(parent_sampling_decision)
+    transaction_context = sampling_context["transaction_context"]
+    name = transaction_context.get("name")
+    if name is not None:
+        if name.startswith("background."):
+            return settings.SENTRY_TRACES_BACKGROUND_SAMPLE_RATE
+    return settings.SENTRY_TRACES_SAMPLE_RATE

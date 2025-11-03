@@ -95,7 +95,11 @@ class Nginx:
             if conf.https:
                 await run_async(self.run_certbot, conf.domain, acme)
             await run_async(self.write_conf, conf.render(), conf_name)
-            if conf.router is not None:
+            if (
+                isinstance(conf, ServiceConfig)
+                and conf.router is not None
+                and conf.model_id is not None
+            ):
                 replicas = len(conf.replicas)
                 model_id = conf.model_id
                 logger.info(

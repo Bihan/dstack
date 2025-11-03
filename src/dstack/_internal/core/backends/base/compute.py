@@ -1026,11 +1026,13 @@ def get_dstack_gateway_wheel(build: str) -> str:
 
 def get_dstack_gateway_commands() -> List[str]:
     build = get_dstack_runner_version()
+    wheel = get_dstack_gateway_wheel(build)
     return [
         "mkdir -p /home/ubuntu/dstack",
         "python3 -m venv /home/ubuntu/dstack/blue",
         "python3 -m venv /home/ubuntu/dstack/green",
-        f"/home/ubuntu/dstack/blue/bin/pip install {get_dstack_gateway_wheel(build)}",
+        f"/home/ubuntu/dstack/blue/bin/pip install {wheel}",
+        "/home/ubuntu/dstack/blue/bin/pip install --upgrade 'dstack-gateway[sglang]'",
         "sudo /home/ubuntu/dstack/blue/bin/python -m dstack.gateway.systemd install --run",
     ]
 

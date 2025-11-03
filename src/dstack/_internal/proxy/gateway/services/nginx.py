@@ -11,6 +11,7 @@ import jinja2
 from pydantic import BaseModel
 from typing_extensions import Literal
 
+from dstack._internal.core.models.routers import AnyRouterConfig
 from dstack._internal.proxy.gateway.const import DSTACK_DIR_ON_GATEWAY, PROXY_PORT_ON_GATEWAY
 from dstack._internal.proxy.gateway.models import ACMESettings
 from dstack._internal.proxy.lib.errors import ProxyError, UnexpectedProxyError
@@ -66,7 +67,7 @@ class ServiceConfig(SiteConfig):
     limit_req_zones: list[LimitReqZoneConfig]
     locations: list[LocationConfig]
     replicas: list[ReplicaConfig]
-    router: Optional[str] = None
+    router: Optional[AnyRouterConfig] = None
     model_id: Optional[str] = None
 
 
@@ -94,7 +95,7 @@ class Nginx:
             if conf.https:
                 await run_async(self.run_certbot, conf.domain, acme)
             await run_async(self.write_conf, conf.render(), conf_name)
-            if hasattr(conf, "router") and conf.router == "sglang":
+            if conf.router is not None:
                 replicas = len(conf.replicas)
                 model_id = conf.model_id
                 logger.info(

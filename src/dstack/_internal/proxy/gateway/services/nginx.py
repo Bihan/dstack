@@ -13,6 +13,7 @@ from typing_extensions import Literal
 
 from dstack._internal.core.models.routers import AnyRouterConfig
 from dstack._internal.proxy.gateway.const import DSTACK_DIR_ON_GATEWAY, PROXY_PORT_ON_GATEWAY
+from dstack._internal.proxy.gateway.model_routers import Router
 from dstack._internal.proxy.gateway.models import ACMESettings
 from dstack._internal.proxy.lib.errors import ProxyError, UnexpectedProxyError
 from dstack._internal.utils.common import run_async
@@ -67,7 +68,7 @@ class ServiceConfig(SiteConfig):
     limit_req_zones: list[LimitReqZoneConfig]
     locations: list[LocationConfig]
     replicas: list[ReplicaConfig]
-    router: Optional[AnyRouterConfig] = None
+    router_config: Optional[AnyRouterConfig] = None
     model_id: Optional[str] = None
 
 
@@ -82,6 +83,7 @@ class Nginx:
     def __init__(self, conf_dir: Path = Path("/etc/nginx/sites-enabled")) -> None:
         self._conf_dir = conf_dir
         self._lock: Lock = Lock()
+        self._router: Optional[Router] = None
         self._domain_to_model_id: dict[str, str] = {}
         # Track next available port for worker allocation
         self._next_worker_port: int = 10001  # Start from 10001
@@ -97,7 +99,7 @@ class Nginx:
             await run_async(self.write_conf, conf.render(), conf_name)
             if (
                 isinstance(conf, ServiceConfig)
-                and conf.router is not None
+                and conf.router_config is not None
                 and conf.model_id is not None
             ):
                 replicas = len(conf.replicas)

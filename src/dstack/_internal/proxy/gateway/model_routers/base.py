@@ -1,11 +1,10 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-if TYPE_CHECKING:
-    from dstack._internal.core.models.routers import AnyRouterConfig
+from dstack._internal.core.models.routers import AnyRouterConfig
 
 
 class RouterContext(BaseModel):

@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Type
 from dstack._internal.core.models.routers import AnyRouterConfig, RouterType
 from dstack._internal.utils.logging import get_logger
 
-from .base import Replica, ReplicaGroup, Router, RouterContext
+from .base import Replica, Router, RouterContext
 
 logger = get_logger(__name__)
 
@@ -78,6 +78,5 @@ __all__ = [
     "Router",
     "RouterContext",
     "Replica",
-    "ReplicaGroup",
     "get_router",
 ]

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from dstack._internal.core.models.routers import AnyRouterConfig
 
@@ -20,20 +20,14 @@ class RouterContext(BaseModel):
 
 
 class Replica(BaseModel):
-    """Represents a single replica (worker) endpoint managed by the router."""
+    """Represents a single replica (worker) endpoint managed by the router.
 
-    url: str
-
-
-class ReplicaGroup(BaseModel):
-    """Represents a logical group of replicas that share one identity (id).
-
-    In SGLang, id = model_id. A ReplicaGroup corresponds to a service in dstack.
-    Multiple services can share the same router instance (e.g., SGLang's IGW mode).
+    The model field identifies which model this replica serves.
+    In SGLang, model = model_id (e.g., "meta-llama/Meta-Llama-3.1-8B-Instruct").
     """
 
-    id: str
-    replicas: List[Replica] = Field(default_factory=list)
+    url: str
+    model: str  # (e.g., "meta-llama/Meta-Llama-3.1-8B-Instruct")
 
 
 class Router(ABC):
@@ -84,53 +78,44 @@ class Router(ABC):
         """
         ...
 
-    # Group lifecycle
     @abstractmethod
-    def add_replica_group(self, domain: str, group_id: str, num_replicas: int) -> None:
-        """Add a new replica group with the specified number of replicas.
+    def register_replicas(self, domain: str, model_id: str, num_replicas: int) -> List[Replica]:
+        """Register a model and assign replicas to it (allocate ports/URLs for workers).
+
+        This method handles both new model registration and updates to existing models.
+        If the model already exists, it updates the replica count; otherwise, it creates a new model.
 
         Args:
             domain: The domain name for this service (for reference/namespacing).
-            group_id: The unique identifier for this replica group (e.g., model_id).
-            num_replicas: The number of replicas to allocate.
+            model_id: The model identifier (e.g., "meta-llama/Meta-Llama-3.1-8B-Instruct").
+            num_replicas: The number of replicas to allocate for this model.
+
+        Returns:
+            List of Replica objects with allocated URLs and model_id set.
 
         Raises:
-            Exception: If the group already exists or allocation fails.
+            Exception: If allocation fails.
         """
         ...
 
     @abstractmethod
-    def update_replica_group(self, group: ReplicaGroup) -> None:
-        """Update an existing replica group.
-
-        Args:
-            group: The ReplicaGroup to update.
-
-        Raises:
-            Exception: If the group does not exist or update fails.
-        """
-        ...
-
-    @abstractmethod
-    def remove_replica_group(self, domain: str, group_id: str) -> None:
-        """Remove a replica group and all its replicas from the router.
+    def unregister_replicas(self, domain: str) -> None:
+        """Unregister replicas for a domain (remove model and unassign all its replicas).
 
         Args:
             domain: The domain name for this service.
-            group_id: The unique identifier for the replica group (e.g., model_id).
 
         Raises:
-            Exception: If removal fails.
+            Exception: If removal fails or domain is not found.
         """
         ...
 
     @abstractmethod
-    def add_replicas(self, group_id: str, replicas: List[Replica]) -> None:
-        """Add replicas to an existing group.
+    def add_replicas(self, replicas: List[Replica]) -> None:
+        """Register replicas with the router (actual HTTP API calls to add workers).
 
         Args:
-            group_id: The unique identifier for the replica group (e.g., model_id).
-            replicas: The list of replicas to add.
+            replicas: The list of replicas to register. Each replica must have model_id set.
 
         Raises:
             Exception: If adding replicas fails.
@@ -138,12 +123,11 @@ class Router(ABC):
         ...
 
     @abstractmethod
-    def remove_replicas(self, group_id: str, replicas: List[Replica]) -> None:
-        """Remove replicas from an existing group.
+    def remove_replicas(self, replicas: List[Replica]) -> None:
+        """Unregister replicas from the router (actual HTTP API calls to remove workers).
 
         Args:
-            group_id: The unique identifier for the replica group (e.g., model_id).
-            replicas: The list of replicas to remove.
+            replicas: The list of replicas to unregister. Each replica must have model_id set.
 
         Raises:
             Exception: If removing replicas fails.
@@ -151,35 +135,13 @@ class Router(ABC):
         ...
 
     @abstractmethod
-    def update_replicas(self, group_id: str, replicas: List[Replica]) -> None:
-        """Update replicas for a group, replacing the current set.
+    def update_replicas(self, replicas: List[Replica]) -> None:
+        """Update replicas for a model, replacing the current set.
 
         Args:
-            group_id: The unique identifier for the replica group (e.g., model_id).
-            replicas: The new list of replicas for this group.
+            replicas: The new list of replicas for this model. Each replica must have model_id set.
 
         Raises:
             Exception: If updating replicas fails.
-        """
-        ...
-
-    @abstractmethod
-    def has_replica_group(self, group_id: str) -> bool:
-        """Check if a replica group with the given group_id exists.
-
-        Args:
-            group_id: The identifier of the replica group (e.g., model_id).
-
-        Returns:
-            True if the group exists, False otherwise.
-        """
-        ...
-
-    @abstractmethod
-    def list_replica_groups(self) -> List[ReplicaGroup]:
-        """List all replica groups managed by this router.
-
-        Returns:
-            A list of all ReplicaGroups.
         """
         ...

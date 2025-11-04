@@ -9,7 +9,7 @@ from dstack._internal.core.models.routers import SGLangRouterConfig
 from dstack._internal.proxy.gateway.const import DSTACK_DIR_ON_GATEWAY
 from dstack._internal.utils.logging import get_logger
 
-from .base import Replica, ReplicaGroup, Router, RouterContext
+from .base import Replica, Router, RouterContext
 
 logger = get_logger(__name__)
 
@@ -26,7 +26,7 @@ class SglangRouter(Router):
             router_config: SGLang router configuration (policy, cache_threshold, etc.)
             context: Runtime context for the router (host, port, logging, etc.)
         """
-        super().__init__(context)
+        super().__init__(router_config=router_config, context=context)
         self.config = router_config
         self._domain_to_model_id: Dict[str, str] = {}  # domain -> model_id
         self._domain_to_ports: Dict[
@@ -54,7 +54,7 @@ class SglangRouter(Router):
                 "-m",
                 "sglang_router.launch_router",
                 "--host",
-                self.context.host,
+                "0.0.0.0",  # Bind to all interfaces (nginx connects via 127.0.0.1)
                 "--port",
                 str(self.context.port),
                 "--enable-igw",
@@ -118,21 +118,32 @@ class SglangRouter(Router):
             logger.error(f"Error checking sglang router status: {e}")
             return False
 
-    def has_replica_group(self, group_id: str) -> bool:
-        """Check if a replica group with the given group_id exists."""
-        return group_id in self._domain_to_model_id.values()
+    def is_model_registered(self, model_id: str) -> bool:
+        """Check if a model with the given model_id is registered."""
+        return model_id in self._domain_to_model_id.values()
 
-    def add_replica_group(self, domain: str, group_id: str, num_replicas: int) -> None:
-        """Add a new replica group with the specified number of replicas.
+    def register_replicas(self, domain: str, model_id: str, num_replicas: int) -> List[Replica]:
+        """Register a model and assign replicas to it (allocate ports/URLs for workers).
+
+        This method handles both new model registration and updates to existing models.
+        If the model already exists, it updates the replica count; otherwise, it creates a new model.
+        """
+        if self.is_model_registered(model_id):
+            return self.update_replica_group(domain, model_id, num_replicas)
+        else:
+            return self.add_replica_group(domain, model_id, num_replicas)
+
+    def add_replica_group(self, domain: str, model_id: str, num_replicas: int) -> List[Replica]:
+        """Assign replicas to a model (allocate ports/URLs for workers serving this model).
 
         This allocates ports but does NOT register replicas with the router.
-        Use get_replica_group(group_id) to retrieve the allocated ReplicaGroup.
+        Returns a list of Replica objects with allocated URLs and model_id set.
         """
-        if self.has_replica_group(group_id):
-            raise ValueError(f"Replica group {group_id} already exists")
+        if self.is_model_registered(model_id):
+            raise ValueError(f"Model {model_id} already exists")
 
         # Store domain -> model_id mapping
-        self._domain_to_model_id[domain] = group_id
+        self._domain_to_model_id[domain] = model_id
 
         # Allocate ports for replicas
         allocated_ports = []
@@ -143,50 +154,48 @@ class SglangRouter(Router):
         self._domain_to_ports[domain] = allocated_ports
 
         logger.debug(
-            f"Allocated replica group {group_id} (domain {domain}) with {num_replicas} replicas "
+            f"Allocated model {model_id} (domain {domain}) with {num_replicas} replicas "
             f"on ports {allocated_ports}"
         )
 
-    def get_replica_group(self, group_id: str) -> Optional[ReplicaGroup]:
-        """Get the ReplicaGroup for a given group_id with allocated replica URLs.
+        # Create Replica objects with URLs and model_id
+        replicas = [
+            Replica(url=f"http://{self.context.host}:{port}", model=model_id)
+            for port in allocated_ports
+        ]
+        return replicas
 
-        This is useful after calling add_replica_group to get the allocated URLs.
-        """
-        # Find domain for this group_id
-        domain = None
-        for d, model_id in self._domain_to_model_id.items():
-            if model_id == group_id:
-                domain = d
-                break
-
-        if domain is None:
-            return None
-
-        # Get allocated ports
-        allocated_ports = self._domain_to_ports.get(domain, [])
-
-        # Create Replica objects with URLs
-        replicas = [Replica(url=f"http://{self.context.host}:{port}") for port in allocated_ports]
-
-        return ReplicaGroup(id=group_id, replicas=replicas)
-
-    def update_replica_group(self, group: ReplicaGroup) -> None:
-        """Update an existing replica group.
+    def update_replica_group(self, domain: str, model_id: str, num_replicas: int) -> List[Replica]:
+        """Update the number of replicas assigned to a model.
 
         This allocates/deallocates ports but does NOT register replicas with the router.
+        Returns a list of Replica objects with allocated URLs and model_id set.
         """
-        # Find domain for this group_id
-        domain = None
-        for d, model_id in self._domain_to_model_id.items():
-            if model_id == group.id:
-                domain = d
-                break
+        if not self.is_model_registered(model_id):
+            raise ValueError(f"Model {model_id} not found")
 
-        if domain is None:
-            raise ValueError(f"Replica group {group.id} not found")
+        # Verify domain matches
+        if self._domain_to_model_id.get(domain) != model_id:
+            raise ValueError(f"Domain {domain} does not match model_id {model_id}")
 
-        # Update allocated ports based on current replicas
-        allocated_ports = [int(r.url.rsplit(":", 1)[-1]) for r in group.replicas]
+        # Get current allocated ports
+        current_ports = self._domain_to_ports.get(domain, [])
+        current_count = len(current_ports)
+
+        if num_replicas == current_count:
+            # No change needed, return existing replicas
+            replicas = [
+                Replica(url=f"http://{self.context.host}:{port}", model=model_id)
+                for port in current_ports
+            ]
+            return replicas
+
+        # Re-allocate ports for new count
+        allocated_ports = []
+        for _ in range(num_replicas):
+            allocated_ports.append(self._next_worker_port)
+            self._next_worker_port += 1
+
         self._domain_to_ports[domain] = allocated_ports
 
         # Update next_worker_port if needed
@@ -196,14 +205,32 @@ class SglangRouter(Router):
                 self._next_worker_port = max_port + 1
 
         logger.debug(
-            f"Updated replica group {group.id} (domain {domain}) with {len(group.replicas)} replicas "
+            f"Updated model {model_id} (domain {domain}) with {num_replicas} replicas "
             f"on ports {allocated_ports}"
         )
 
-    def remove_replica_group(self, domain: str, group_id: str) -> None:
-        """Remove a replica group and all its replicas from the router."""
+        # Create Replica objects with URLs and model_id
+        replicas = [
+            Replica(url=f"http://{self.context.host}:{port}", model=model_id)
+            for port in allocated_ports
+        ]
+        return replicas
+
+    def unregister_replicas(self, domain: str) -> None:
+        """Unregister replicas for a domain (remove model and unassign all its replicas)."""
+        # Get model_id from domain mapping
+        model_id = self._domain_to_model_id.get(domain)
+        if model_id is None:
+            logger.warning(f"Domain {domain} not found in router mapping, skipping unregister")
+            return
+
+        # Remove the model and all its replicas
+        self.remove_replica_group(domain, model_id)
+
+    def remove_replica_group(self, domain: str, model_id: str) -> None:
+        """Remove a model and unassign all its replicas from the router."""
         # Remove all workers for this model_id from the router
-        current_workers = self._get_router_workers(group_id)
+        current_workers = self._get_router_workers(model_id)
         for worker in current_workers:
             self._remove_worker_from_router(worker["url"])
 
@@ -213,58 +240,75 @@ class SglangRouter(Router):
         if domain in self._domain_to_ports:
             del self._domain_to_ports[domain]
 
-        logger.debug(f"Removed replica group {group_id} (domain {domain})")
+        logger.debug(f"Removed model {model_id} (domain {domain})")
 
-    def add_replicas(self, group_id: str, replicas: List[Replica]) -> None:
-        """Add replicas to an existing group."""
+    def add_replicas(self, replicas: List[Replica]) -> None:
+        """Register replicas with the router (actual HTTP API calls to add workers)."""
         for replica in replicas:
-            self._add_worker_to_router(replica.url, group_id)
+            self._add_worker_to_router(replica.url, replica.model)
 
-    def remove_replicas(self, group_id: str, replicas: List[Replica]) -> None:
-        """Remove replicas from an existing group."""
+    def remove_replicas(self, replicas: List[Replica]) -> None:
+        """Unregister replicas from the router (actual HTTP API calls to remove workers)."""
         for replica in replicas:
             self._remove_worker_from_router(replica.url)
 
-    def update_replicas(self, group_id: str, replicas: List[Replica]) -> None:
-        """Update replicas for a group, replacing the current set."""
-        # Get current workers for this model_id
-        current_workers = self._get_router_workers(group_id)
-        current_worker_urls = {worker["url"] for worker in current_workers}
+    def update_replicas(self, replicas: List[Replica]) -> None:
+        """Update replicas for a model, replacing the current set."""
+        # Group replicas by model_id
+        replicas_by_model: Dict[str, List[Replica]] = {}
+        for replica in replicas:
+            if replica.model not in replicas_by_model:
+                replicas_by_model[replica.model] = []
+            replicas_by_model[replica.model].append(replica)
 
-        # Calculate target worker URLs
-        target_worker_urls = {replica.url for replica in replicas}
+        # Update each model separately
+        for model_id, model_replicas in replicas_by_model.items():
+            # Get current workers for this model_id
+            current_workers = self._get_router_workers(model_id)
+            current_worker_urls = {worker["url"] for worker in current_workers}
 
-        # Workers to add
-        workers_to_add = target_worker_urls - current_worker_urls
-        # Workers to remove
-        workers_to_remove = current_worker_urls - target_worker_urls
+            # Calculate target worker URLs
+            target_worker_urls = {replica.url for replica in model_replicas}
 
-        if workers_to_add:
-            logger.info("Sglang router update: adding %d workers", len(workers_to_add))
-        if workers_to_remove:
-            logger.info("Sglang router update: removing %d workers", len(workers_to_remove))
+            # Workers to add
+            workers_to_add = target_worker_urls - current_worker_urls
+            # Workers to remove
+            workers_to_remove = current_worker_urls - target_worker_urls
 
-        # Add workers
-        for worker_url in sorted(workers_to_add):
-            success = self._add_worker_to_router(worker_url, group_id)
-            if not success:
-                logger.warning("Failed to add worker %s, continuing with others", worker_url)
+            if workers_to_add:
+                logger.info(
+                    "Sglang router update: adding %d workers for model %s",
+                    len(workers_to_add),
+                    model_id,
+                )
+            if workers_to_remove:
+                logger.info(
+                    "Sglang router update: removing %d workers for model %s",
+                    len(workers_to_remove),
+                    model_id,
+                )
 
-        # Remove workers
-        for worker_url in sorted(workers_to_remove):
-            success = self._remove_worker_from_router(worker_url)
-            if not success:
-                logger.warning("Failed to remove worker %s, continuing with others", worker_url)
+            # Add workers
+            for worker_url in sorted(workers_to_add):
+                success = self._add_worker_to_router(worker_url, model_id)
+                if not success:
+                    logger.warning("Failed to add worker %s, continuing with others", worker_url)
 
-    def list_replica_groups(self) -> List[ReplicaGroup]:
-        """List all replica groups managed by this router."""
-        groups = []
-        for domain, model_id in self._domain_to_model_id.items():
-            # Get current workers from router
-            workers = self._get_router_workers(model_id)
-            replicas = [Replica(url=worker["url"]) for worker in workers]
-            groups.append(ReplicaGroup(id=model_id, replicas=replicas))
-        return groups
+            # Remove workers
+            for worker_url in sorted(workers_to_remove):
+                success = self._remove_worker_from_router(worker_url)
+                if not success:
+                    logger.warning(
+                        "Failed to remove worker %s, continuing with others", worker_url
+                    )
+
+    def list_replica_groups(self) -> List[str]:
+        """List all model_ids managed by this router.
+
+        Returns:
+            A list of all model_ids.
+        """
+        return list(self._domain_to_model_id.values())
 
     # Private helper methods
 

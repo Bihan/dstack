@@ -53,7 +53,7 @@ class GatewayConfiguration(CoreModel):
     region: Annotated[str, Field(description="The gateway region")]
     router_config: Annotated[
         Optional[AnyRouterConfig],
-        Field(description="The router configuration", alias="router"),
+        Field(description="The router configuration"),
     ] = None
     domain: Annotated[
         Optional[str], Field(description="The gateway domain, e.g. `example.com`")

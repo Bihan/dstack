@@ -1,12 +1,9 @@
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type
 
-from dstack._internal.core.models.routers import RouterType
+from dstack._internal.core.models.routers import AnyRouterConfig, RouterType
 from dstack._internal.utils.logging import get_logger
 
 from .base import Replica, ReplicaGroup, Router, RouterContext
-
-if TYPE_CHECKING:
-    from dstack._internal.core.models.routers import AnyRouterConfig
 
 logger = get_logger(__name__)
 

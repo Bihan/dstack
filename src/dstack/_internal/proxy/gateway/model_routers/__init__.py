@@ -11,7 +11,6 @@ logger = get_logger(__name__)
 
 _ROUTER_CLASSES: List[Type[Router]] = []
 
-# Try to import SGLang router
 try:
     from dstack._internal.proxy.gateway.model_routers.sglang import SglangRouter
 
@@ -23,7 +22,6 @@ except ImportError as e:
 _ROUTER_TYPE_TO_CLASS_MAP: Dict[RouterType, Type[Router]] = {}
 
 for router_class in _ROUTER_CLASSES:
-    # Each router class must have a TYPE attribute
     router_type_str = getattr(router_class, "TYPE", None)
     if router_type_str is None:
         logger.warning(f"Router class {router_class.__name__} missing TYPE attribute, skipping")
@@ -35,30 +33,12 @@ _AVAILABLE_ROUTER_TYPES = list(_ROUTER_TYPE_TO_CLASS_MAP.keys())
 
 
 def get_router_class(router_type: RouterType) -> Optional[Type[Router]]:
-    """Get the router class for a given router type.
-
-    Args:
-        router_type: The type of router (e.g., RouterType.SGLANG)
-
-    Returns:
-        The router class if available, None otherwise.
-    """
+    """Get the router class for a given router type."""
     return _ROUTER_TYPE_TO_CLASS_MAP.get(router_type)
 
 
 def get_router(router_config: AnyRouterConfig, context: Optional[RouterContext] = None) -> Router:
-    """Factory function to create a router instance from router configuration.
-
-    Args:
-        router_config: The router configuration (SGLangRouterConfig, VLLMRouterConfig, etc.)
-        context: Optional router context for initialization
-
-    Returns:
-        A router instance
-
-    Raises:
-        ValueError: If the router type is not available or not supported
-    """
+    """Factory function to create a router instance from router configuration."""
     router_type = RouterType(router_config.type)
     router_class = get_router_class(router_type)
 

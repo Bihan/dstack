@@ -3,7 +3,8 @@ import shutil
 import subprocess
 import time
 import urllib.parse
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import DefaultDict, Dict, List, Optional
 
 from dstack._internal.core.models.routers import SGLangRouterConfig
 from dstack._internal.proxy.gateway.const import DSTACK_DIR_ON_GATEWAY
@@ -234,10 +235,8 @@ class SglangRouter(Router):
     def update_replicas(self, replicas: List[Replica]) -> None:
         """Update replicas for a model, replacing the current set."""
         # Group replicas by model_id
-        replicas_by_model: Dict[str, List[Replica]] = {}
+        replicas_by_model: DefaultDict[str, List[Replica]] = defaultdict(list)
         for replica in replicas:
-            if replica.model not in replicas_by_model:
-                replicas_by_model[replica.model] = []
             replicas_by_model[replica.model].append(replica)
 
         # Update each model separately

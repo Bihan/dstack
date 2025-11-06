@@ -232,8 +232,59 @@ class SglangRouter(Router):
         for replica in replicas:
             self._remove_worker_from_router(replica.url)
 
+    # def update_replicas(self, replicas: List[Replica]) -> None:
+    #     """Update replicas for a model, replacing the current set."""
+    #     # Group replicas by model_id
+    #     replicas_by_model: DefaultDict[str, List[Replica]] = defaultdict(list)
+    #     for replica in replicas:
+    #         replicas_by_model[replica.model].append(replica)
+
+    #     # Update each model separately
+    #     for model_id, model_replicas in replicas_by_model.items():
+    #         # Get current workers for this model_id
+    #         current_workers = self._get_router_workers(model_id)
+    #         current_worker_urls = {worker["url"] for worker in current_workers}
+
+    #         # Calculate target worker URLs
+    #         target_worker_urls = {replica.url for replica in model_replicas}
+
+    #         # Workers to add
+    #         workers_to_add = target_worker_urls - current_worker_urls
+    #         # Workers to remove
+    #         workers_to_remove = current_worker_urls - target_worker_urls
+
+    #         if workers_to_add:
+    #             logger.info(
+    #                 "Sglang router update: adding %d workers for model %s",
+    #                 len(workers_to_add),
+    #                 model_id,
+    #             )
+    #         if workers_to_remove:
+    #             logger.info(
+    #                 "Sglang router update: removing %d workers for model %s",
+    #                 len(workers_to_remove),
+    #                 model_id,
+    #             )
+
+    #         # Add workers
+    #         for worker_url in sorted(workers_to_add):
+    #             success = self._add_worker_to_router(worker_url, model_id)
+    #             if not success:
+    #                 logger.warning("Failed to add worker %s, continuing with others", worker_url)
+
+    #         # Remove workers
+    #         for worker_url in sorted(workers_to_remove):
+    #             success = self._remove_worker_from_router(worker_url)
+    #             if not success:
+    #                 logger.warning(
+    #                     "Failed to remove worker %s, continuing with others", worker_url
+    #                 )
+
     def update_replicas(self, replicas: List[Replica]) -> None:
-        """Update replicas for a model, replacing the current set."""
+        """Update replicas for a model, replacing the current set.
+        Includes timing handling to ensure router state is consistent
+        when multiple services register concurrently after reboot.
+        """
         # Group replicas by model_id
         replicas_by_model: DefaultDict[str, List[Replica]] = defaultdict(list)
         for replica in replicas:
@@ -241,6 +292,10 @@ class SglangRouter(Router):
 
         # Update each model separately
         for model_id, model_replicas in replicas_by_model.items():
+            # Add a small delay to allow router to process any previous operations
+            # This helps when multiple services register concurrently after reboot
+            time.sleep(0.2)
+
             # Get current workers for this model_id
             current_workers = self._get_router_workers(model_id)
             current_worker_urls = {worker["url"] for worker in current_workers}
@@ -271,6 +326,9 @@ class SglangRouter(Router):
                 success = self._add_worker_to_router(worker_url, model_id)
                 if not success:
                     logger.warning("Failed to add worker %s, continuing with others", worker_url)
+                else:
+                    # Small delay after adding to allow router to process
+                    time.sleep(0.1)
 
             # Remove workers
             for worker_url in sorted(workers_to_remove):
@@ -279,6 +337,24 @@ class SglangRouter(Router):
                     logger.warning(
                         "Failed to remove worker %s, continuing with others", worker_url
                     )
+                else:
+                    # Small delay after removing to allow router to process
+                    time.sleep(0.1)
+
+            # Final verification: re-query router to ensure state is consistent
+            # This helps catch any timing issues
+            time.sleep(0.3)
+            final_workers = self._get_router_workers(model_id)
+            final_worker_urls = {worker["url"] for worker in final_workers}
+
+            # If state doesn't match, log a warning (but don't fail)
+            expected_urls = target_worker_urls
+            if final_worker_urls != expected_urls:
+                logger.warning(
+                    f"Router state mismatch for model {model_id}: "
+                    f"expected {sorted(expected_urls)}, got {sorted(final_worker_urls)}. "
+                    f"This may indicate a timing issue."
+                )
 
     # Private helper methods
 

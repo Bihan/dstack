@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 class SglangRouter(Router):
     """SGLang router implementation using IGW (Inference Gateway) mode for multi-model serving."""
 
-    TYPE = "sglang"  # Router type identifier
+    TYPE = "sglang"
 
     def __init__(self, router_config: SGLangRouterConfig, context: Optional[RouterContext] = None):
         """Initialize SGLang router.
@@ -66,6 +66,8 @@ class SglangRouter(Router):
 
             if hasattr(self.config, "policy") and self.config.policy:
                 cmd.extend(["--policy", self.config.policy])
+
+            # Add additional required configs here
 
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -122,12 +124,27 @@ class SglangRouter(Router):
         """Check if a model with the given model_id is registered."""
         return model_id in self._domain_to_model_id.values()
 
-    def register_replicas(self, domain: str, model_id: str, num_replicas: int) -> List[Replica]:
-        """Register a model and assign replicas to it (allocate ports/URLs for workers).
+    def register_replicas(
+        self, domain: str, num_replicas: int, model_id: Optional[str] = None
+    ) -> List[Replica]:
+        """Register replicas to a domain (allocate ports/URLs for workers).
+        SGLang router uses IGW (Inference Gateway) mode, which requires model_id for multi-model serving.
 
-        This method handles both new model registration and updates to existing models.
-        If the model already exists, it updates the replica count; otherwise, it creates a new model.
+        Maintains in-memory state:
+        - domain_to_model_id: Maps domain to model_id for unregistering by domain and model validation.
+        - domain_to_ports: Maps domain to allocated ports to track port assignments and avoid conflicts.
+
+        Args:
+            domain: The domain name for this service.
+            num_replicas: The number of replicas to allocate for this domain.
+            model_id: Model identifier (required for SGLang IGW mode).
+
+        Raises:
+            ValueError: If model_id is None (required for SGLang IGW mode).
         """
+        if model_id is None:
+            raise ValueError("model_id is required for SGLang router (IGW mode)")
+
         is_new_model = not self.is_model_registered(model_id)
 
         if is_new_model:

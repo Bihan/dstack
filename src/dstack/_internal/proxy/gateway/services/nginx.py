@@ -86,12 +86,6 @@ class Nginx:
         self._conf_dir = conf_dir
         self._lock: Lock = Lock()
         self._router: Optional[Router] = None
-        # HARDCODED IMPLEMENTATION (commented for generic router):
-        # self._domain_to_model_id: dict[str, str] = {}
-        # # Track next available port for worker allocation
-        # self._next_worker_port: int = 10001  # Start from 10001
-        # # Track which ports are used by which domain
-        # self._domain_to_ports: dict[str, list[int]] = {}  # domain -> [port1, port2, ...]
 
     async def register(self, conf: SiteConfig, acme: ACMESettings) -> None:
         logger.debug("Registering %s domain %s", conf.type, conf.domain)
@@ -116,41 +110,13 @@ class Nginx:
                 replicas = await run_async(
                     self._router.register_replicas,
                     conf.domain,
-                    conf.model_id,
                     len(conf.replicas),
+                    conf.model_id,
                 )
 
                 allocated_ports = [int(r.url.rsplit(":", 1)[-1]) for r in replicas]
                 await run_async(self.write_router_workers_conf, conf, allocated_ports)
                 await run_async(self._router.update_replicas, replicas)
-
-            # HARDCODED IMPLEMENTATION (commented for generic router):
-            # if (
-            #     isinstance(conf, ServiceConfig)
-            #     and conf.router_config is not None
-            #     and conf.model_id is not None
-            # ):
-            #     replicas = len(conf.replicas)
-            #     model_id = conf.model_id
-            #     logger.info(
-            #         "Registering sglang router with model %s with %d replicas in domain %s",
-            #         model_id,
-            #         replicas,
-            #         conf.domain,
-            #     )
-            #     self._domain_to_model_id[conf.domain] = model_id
-            #     # Allocate unique ports for this service
-            #     allocated_ports = list(
-            #         range(self._next_worker_port, self._next_worker_port + replicas)
-            #     )
-            #     self._domain_to_ports[conf.domain] = allocated_ports
-            #     self._next_worker_port += replicas  # Reserve ports for next service
-            #
-            #     # Pass allocated ports to worker config generation
-            #     await run_async(self.write_sglang_workers_conf, conf, allocated_ports)
-            #     await run_async(
-            #         self.start_or_update_sglang_router, replicas, model_id, allocated_ports
-            #     )
 
         logger.info("Registered %s domain %s", conf.type, conf.domain)
 
@@ -171,20 +137,6 @@ class Nginx:
                 if workers_conf_path.exists():
                     await run_async(sudo_rm, workers_conf_path)
 
-            # HARDCODED IMPLEMENTATION (commented for generic router):
-            # workers_conf_path = self._conf_dir / f"sglang-workers.{domain}.conf"
-            # if workers_conf_path.exists():
-            #     await run_async(sudo_rm, workers_conf_path)
-            #     # Get model_id for this domain before removing workers
-            #     model_id = self._domain_to_model_id.get(domain)
-            #     # This allows other services with different models to continue running
-            #     await run_async(self.remove_sglang_workers_for_model, model_id)
-            #     # Clean up the mapping
-            #     del self._domain_to_model_id[domain]
-            #     # Free up ports
-            #     if domain in self._domain_to_ports:
-            #         del self._domain_to_ports[domain]
-            #     # await run_async(self.stop_sglang_router)
             await run_async(self.reload)
         logger.info("Unregistered domain %s", domain)
 
@@ -194,238 +146,6 @@ class Nginx:
         r = subprocess.run(cmd, timeout=10)
         if r.returncode != 0:
             raise UnexpectedProxyError("Failed to reload nginx")
-
-    # HARDCODED IMPLEMENTATION (commented for generic router):
-    # @staticmethod
-    # def start_or_update_sglang_router(
-    #     replicas: int, model_id: str, allocated_ports: list[int]
-    # ) -> None:
-    #     if not Nginx.is_sglang_router_running():
-    #         Nginx.start_sglang_router()
-    #     # Pass allocated ports to worker update
-    #     Nginx.update_sglang_router_workers(replicas, model_id, allocated_ports)
-    #
-    # @staticmethod
-    # def is_sglang_router_running() -> bool:
-    #     """Check if sglang router is running and responding to HTTP requests."""
-    #     try:
-    #         result = subprocess.run(
-    #             ["curl", "-s", "http://localhost:3000/workers"], capture_output=True, timeout=5
-    #         )
-    #         return result.returncode == 0
-    #     except Exception as e:
-    #         logger.error(f"Error checking sglang router status: {e}")
-    #         return False
-    #
-    # @staticmethod
-    # def start_sglang_router() -> None:
-    #     try:
-    #         logger.info("Starting sglang-router...")
-    #
-    #         # Determine active venv (blue or green)
-    #         version_file = DSTACK_DIR_ON_GATEWAY / "version"
-    #         if version_file.exists():
-    #             version = version_file.read_text().strip()
-    #         else:
-    #             version = "blue"
-    #
-    #         # Use Python from the active venv
-    #         venv_python = DSTACK_DIR_ON_GATEWAY / version / "bin" / "python3"
-    #
-    #         cmd = [
-    #             str(venv_python),
-    #             "-m",
-    #             "sglang_router.launch_router",
-    #             "--host",
-    #             "0.0.0.0",
-    #             "--port",
-    #             "3000",
-    #             "--enable-igw",
-    #             "--log-level",
-    #             "debug",
-    #             "--log-dir",
-    #             "./router_logs",
-    #         ]
-    #         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    #
-    #         import time
-    #
-    #         time.sleep(2)
-    #
-    #         # Verify router is running
-    #         if not Nginx.is_sglang_router_running():
-    #             raise Exception("Failed to start sglang router")
-    #
-    #         logger.info("Sglang router started successfully")
-    #
-    #     except Exception as e:
-    #         logger.error(f"Failed to start sglang-router: {e}")
-    #         raise
-    #
-    # @staticmethod
-    # def get_sglang_router_workers(model_id: str) -> list[dict]:
-    #     try:
-    #         result = subprocess.run(
-    #             ["curl", "-s", "http://localhost:3000/workers"], capture_output=True, timeout=5
-    #         )
-    #         if result.returncode == 0:
-    #             response = json.loads(result.stdout.decode())
-    #             workers = response.get("workers", [])
-    #             workers = [w for w in workers if w.get("model_id") == model_id]
-    #             return workers
-    #         return []
-    #     except Exception as e:
-    #         logger.error(f"Error getting sglang router workers: {e}")
-    #         return []
-    #
-    # @staticmethod
-    # def update_sglang_router_workers(
-    #     replicas: int, model_id: str, allocated_ports: list[int]
-    # ) -> None:
-    #     """Update sglang router workers via HTTP API"""
-    #     try:
-    #         # Get current workers
-    #         current_workers = Nginx.get_sglang_router_workers(model_id)
-    #         current_worker_urls = {worker["url"] for worker in current_workers}
-    #
-    #         # Calculate target worker URLs
-    #         # target_worker_urls = {f"http://127.0.0.1:{10000 + i}" for i in range(1, replicas + 1)}
-    #         # Use explicitly assigned ports instead of calculation
-    #         target_worker_urls = {f"http://127.0.0.1:{port}" for port in allocated_ports}
-    #
-    #         # Workers to add
-    #         workers_to_add = target_worker_urls - current_worker_urls
-    #         # Workers to remove
-    #         workers_to_remove = current_worker_urls - target_worker_urls
-    #
-    #         if workers_to_add:
-    #             logger.info("Sglang router update: adding %d workers", len(workers_to_add))
-    #         if workers_to_remove:
-    #             logger.info("Sglang router update: removing %d workers", len(workers_to_remove))
-    #
-    #         # Add workers
-    #         for worker_url in sorted(workers_to_add):
-    #             success = Nginx.add_sglang_router_worker(worker_url, model_id)
-    #             if not success:
-    #                 logger.warning("Failed to add worker %s, continuing with others", worker_url)
-    #
-    #         # Remove workers
-    #         for worker_url in sorted(workers_to_remove):
-    #             success = Nginx.remove_sglang_router_worker(worker_url, model_id)
-    #             if not success:
-    #                 logger.warning(
-    #                     "Failed to remove worker %s, continuing with others", worker_url
-    #                 )
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error updating sglang router workers for model {model_id}: {e}")
-    #         raise
-    #
-    # @staticmethod
-    # def add_sglang_router_worker(worker_url: str, model_id: str) -> bool:
-    #     try:
-    #         payload = {"url": worker_url, "worker_type": "regular", "model_id": model_id}
-    #         result = subprocess.run(
-    #             [
-    #                 "curl",
-    #                 "-X",
-    #                 "POST",
-    #                 "http://localhost:3000/workers",
-    #                 "-H",
-    #                 "Content-Type: application/json",
-    #                 "-d",
-    #                 json.dumps(payload),
-    #             ],
-    #             capture_output=True,
-    #             timeout=5,
-    #         )
-    #
-    #         if result.returncode == 0:
-    #             response = json.loads(result.stdout.decode())
-    #             if response.get("status") == "accepted":
-    #                 logger.info("Added worker %s to sglang router", worker_url)
-    #                 return True
-    #             else:
-    #                 logger.error("Failed to add worker %s: %s", worker_url, response)
-    #                 return False
-    #         else:
-    #             logger.error("Failed to add worker %s: %s", worker_url, result.stderr.decode())
-    #             return False
-    #     except Exception as e:
-    #         logger.error(f"Error adding worker {worker_url}: {e}")
-    #         return False
-    #
-    # @staticmethod
-    # def remove_sglang_router_worker(worker_url: str, model_id: str) -> bool:
-    #     """Remove a single worker from sglang router"""
-    #     try:
-    #         # URL encode the worker URL for the DELETE request
-    #         encoded_url = urllib.parse.quote(worker_url, safe="")
-    #
-    #         result = subprocess.run(
-    #             ["curl", "-X", "DELETE", f"http://localhost:3000/workers/{encoded_url}"],
-    #             capture_output=True,
-    #             timeout=5,
-    #         )
-    #
-    #         if result.returncode == 0:
-    #             response = json.loads(result.stdout.decode())
-    #             if response.get("status") == "accepted":
-    #                 logger.info(
-    #                     "Removed worker %s from sglang router model %s", worker_url, model_id
-    #                 )
-    #                 return True
-    #             else:
-    #                 logger.error(
-    #                     "Failed to remove worker %s model %s: %s", worker_url, model_id, response
-    #                 )
-    #                 return False
-    #         else:
-    #             logger.error(
-    #                 "Failed to remove worker %s model %s: %s",
-    #                 worker_url,
-    #                 model_id,
-    #                 result.stderr.decode(),
-    #             )
-    #             return False
-    #     except Exception as e:
-    #         logger.error(f"Error removing worker {worker_url} model {model_id}: {e}")
-    #         return False
-    #
-    # @staticmethod
-    # def remove_sglang_workers_for_model(model_id: str) -> None:
-    #     try:
-    #         workers = Nginx.get_sglang_router_workers(model_id)
-    #         for worker in workers:
-    #             Nginx.remove_sglang_router_worker(worker["url"], model_id)
-    #     except Exception as e:
-    #         logger.error(f"Error removing sglang router workers for model {model_id}: {e}")
-    #         raise
-    #
-    # @staticmethod
-    # def stop_sglang_router() -> None:
-    #     try:
-    #         result = subprocess.run(
-    #             ["pgrep", "-f", "sglang::router"], capture_output=True, timeout=5
-    #         )
-    #         if result.returncode == 0:
-    #             logger.info("Stopping sglang-router process...")
-    #             subprocess.run(["pkill", "-f", "sglang::router"], timeout=5)
-    #         else:
-    #             logger.debug("No sglang-router process found to stop")
-    #
-    #         log_dir = Path("./router_logs")
-    #         if log_dir.exists():
-    #             logger.debug("Cleaning up router logs...")
-    #             import shutil
-    #
-    #             shutil.rmtree(log_dir, ignore_errors=True)
-    #         else:
-    #             logger.debug("No router logs directory found to clean up")
-    #
-    #     except Exception as e:
-    #         logger.error(f"Failed to stop sglang-router: {e}")
-    #         raise
 
     def write_conf(self, conf: str, conf_name: str) -> None:
         """Update config and reload nginx. Rollback changes on error."""
@@ -498,15 +218,6 @@ class Nginx:
         sudo_write(workers_conf_path, workers_config)
         self.reload()
 
-    # HARDCODED IMPLEMENTATION (commented for generic router):
-    # def write_sglang_workers_conf(self, conf: SiteConfig, allocated_ports: list[int]) -> None:
-    #     # Pass ports to template
-    #     workers_config = generate_sglang_workers_config(conf, allocated_ports)
-    #     workers_conf_name = f"sglang-workers.{conf.domain}.conf"
-    #     workers_conf_path = self._conf_dir / workers_conf_name
-    #     sudo_write(workers_conf_path, workers_config)
-    #     self.reload()
-
 
 def generate_router_workers_config(conf: ServiceConfig, allocated_ports: list[int]) -> str:
     """Generate router workers configuration (generic, uses sglang_workers.jinja2 template)."""
@@ -516,16 +227,6 @@ def generate_router_workers_config(conf: ServiceConfig, allocated_ports: list[in
         ports=allocated_ports,
         proxy_port=PROXY_PORT_ON_GATEWAY,
     )
-
-
-# HARDCODED IMPLEMENTATION (commented for generic router):
-# def generate_sglang_workers_config(conf: SiteConfig, allocated_ports: list[int]) -> str:
-#     template = read_package_resource("sglang_workers.jinja2")
-#     return jinja2.Template(template).render(
-#         replicas=conf.replicas,
-#         ports=allocated_ports,
-#         proxy_port=PROXY_PORT_ON_GATEWAY,
-#     )
 
 
 def read_package_resource(file: str) -> str:

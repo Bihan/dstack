@@ -294,7 +294,7 @@ class SglangRouter(Router):
         for model_id, model_replicas in replicas_by_model.items():
             # Add a small delay to allow router to process any previous operations
             # This helps when multiple services register concurrently after reboot
-            time.sleep(0.2)
+            time.sleep(5)
 
             # Get current workers for this model_id
             current_workers = self._get_router_workers(model_id)
@@ -328,7 +328,7 @@ class SglangRouter(Router):
                     logger.warning("Failed to add worker %s, continuing with others", worker_url)
                 else:
                     # Small delay after adding to allow router to process
-                    time.sleep(0.1)
+                    time.sleep(5)
 
             # Remove workers
             for worker_url in sorted(workers_to_remove):
@@ -339,11 +339,11 @@ class SglangRouter(Router):
                     )
                 else:
                     # Small delay after removing to allow router to process
-                    time.sleep(0.1)
+                    time.sleep(5)
 
             # Final verification: re-query router to ensure state is consistent
             # This helps catch any timing issues
-            time.sleep(0.3)
+            time.sleep(5)
             final_workers = self._get_router_workers(model_id)
             final_worker_urls = {worker["url"] for worker in final_workers}
 

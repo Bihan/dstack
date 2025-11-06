@@ -115,8 +115,16 @@ class Nginx:
                 )
 
                 allocated_ports = [int(r.url.rsplit(":", 1)[-1]) for r in replicas]
-                await run_async(self.write_router_workers_conf, conf, allocated_ports)
-                await run_async(self._router.update_replicas, replicas)
+                try:
+                    await run_async(self.write_router_workers_conf, conf, allocated_ports)
+                except Exception as e:
+                    logger.exception(
+                        "write_router_workers_conf failed for domain=%s: %s", conf.domain, e
+                    )
+                    raise
+                finally:
+                    # Always update router state, regardless of nginx reload status
+                    await run_async(self._router.update_replicas, replicas)
 
         logger.info("Registered %s domain %s", conf.type, conf.domain)
 

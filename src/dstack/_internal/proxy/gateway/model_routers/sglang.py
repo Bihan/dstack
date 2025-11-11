@@ -63,6 +63,10 @@ class SglangRouter(Router):
                 self.context.log_level,
                 "--log-dir",
                 str(self.context.log_dir),
+                "--prometheus-host",
+                "0.0.0.0",
+                "--prometheus-port",
+                "29000",
             ]
 
             if hasattr(self.config, "policy") and self.config.policy:

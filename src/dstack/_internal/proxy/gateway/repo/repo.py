@@ -18,6 +18,9 @@ class State(BaseModel):
     entrypoints: dict[str, ModelEntrypoint] = {}
     projects: dict[str, Project] = {}
     config: GlobalProxyConfig = GlobalProxyConfig()
+    replica_internal_ips: dict[
+        str, dict[str, dict[str, str]]
+    ] = {}  # project -> run_name -> replica_id -> internal_ip
 
 
 class GatewayProxyRepo(BaseProxyRepo):
@@ -96,6 +99,40 @@ class GatewayProxyRepo(BaseProxyRepo):
     async def set_config(self, config: GlobalProxyConfig) -> None:
         async with self.writer():
             self._state.config = config
+
+    async def set_replica_internal_ip(
+        self, project_name: str, run_name: str, replica_id: str, internal_ip: Optional[str]
+    ) -> None:
+        """Store replica internal IP separately."""
+        async with self.writer():
+            self._state.replica_internal_ips.setdefault(project_name, {}).setdefault(run_name, {})[
+                replica_id
+            ] = internal_ip or ""
+
+    async def get_replica_internal_ip(
+        self, project_name: str, run_name: str, replica_id: str
+    ) -> Optional[str]:
+        """Get replica internal IP."""
+        async with self.reader():
+            ip = (
+                self._state.replica_internal_ips.get(project_name, {})
+                .get(run_name, {})
+                .get(replica_id)
+            )
+            return ip if ip else None
+
+    async def delete_replica_internal_ip(
+        self, project_name: str, run_name: str, replica_id: str
+    ) -> None:
+        """Delete replica internal IP when replica is unregistered."""
+        async with self.writer():
+            project_ips = self._state.replica_internal_ips.get(project_name, {})
+            run_ips = project_ips.get(run_name, {})
+            run_ips.pop(replica_id, None)
+            if not run_ips:
+                project_ips.pop(run_name, None)
+            if not project_ips:
+                self._state.replica_internal_ips.pop(project_name, None)
 
     @asynccontextmanager
     async def reader(self):

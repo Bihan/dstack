@@ -13,6 +13,7 @@ from typing_extensions import Literal
 from dstack._internal.core.models.routers import AnyRouterConfig, RouterType
 from dstack._internal.proxy.gateway.const import PROXY_PORT_ON_GATEWAY
 from dstack._internal.proxy.gateway.models import ACMESettings
+from dstack._internal.proxy.gateway.repo.repo import GatewayProxyRepo
 from dstack._internal.proxy.gateway.services.model_routers import (
     Router,
     RouterContext,
@@ -64,6 +65,7 @@ class LocationConfig(BaseModel):
 class ServiceConfig(SiteConfig):
     type: Literal["service"] = "service"
     project_name: str
+    run_name: str
     auth: bool
     client_max_body_size: int
     access_log_path: Path
@@ -98,7 +100,9 @@ class Nginx:
         self._domain_to_worker_ports: Dict[str, list[int]] = {}
         self._next_worker_port: int = self._WORKER_PORT_MIN
 
-    async def register(self, conf: SiteConfig, acme: ACMESettings) -> None:
+    async def register(
+        self, conf: SiteConfig, acme: ACMESettings, repo: Optional[GatewayProxyRepo] = None
+    ) -> None:
         logger.debug("Registering %s domain %s", conf.type, conf.domain)
         conf_name = self.get_config_name(conf.domain)
         async with self._lock:
@@ -108,6 +112,12 @@ class Nginx:
             if isinstance(conf, ServiceConfig) and conf.router:
                 if conf.router.type == RouterType.SGLANG:
                     # Check if router already exists for this domain
+                    if repo:
+                        for replica in conf.replicas:
+                            ip = await repo.get_replica_internal_ip(
+                                conf.project_name, conf.run_name, replica.id
+                            )
+                            logger.info("Replica %s internal IP: %s", replica.id, ip)
                     if conf.domain in self._domain_to_router:
                         # Router already exists, reuse it
                         router = self._domain_to_router[conf.domain]

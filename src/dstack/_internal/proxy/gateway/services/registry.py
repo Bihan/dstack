@@ -136,6 +136,7 @@ async def register_replica(
     repo: GatewayProxyRepo,
     nginx: Nginx,
     service_conn_pool: ServiceConnectionPool,
+    internal_ip: Optional[str] = None,
 ) -> None:
     replica = models.Replica(
         id=replica_id,
@@ -175,6 +176,7 @@ async def register_replica(
                 f" in service {service.fmt()}: {failures[replica]}"
             )
         await repo.set_service(service)
+        await repo.set_replica_internal_ip(project_name, run_name, replica_id, internal_ip)
 
     logger.info("Replica %s in service %s is registered now", replica.id, service.fmt())
 
@@ -213,6 +215,7 @@ async def unregister_replica(
             service_conn_pool=service_conn_pool,
         )
         await repo.set_service(service)
+        await repo.delete_replica_internal_ip(project_name, run_name, replica_id)
 
     logger.info("Replica %s in service %s is unregistered now", replica_id, service.fmt())
 
@@ -261,7 +264,7 @@ async def apply_service(
         ReplicaConfig(id=replica.id, socket=conn.app_socket_path)
         for replica, conn in replica_conns.items()
     ]
-    service_config = await get_nginx_service_config(service, replica_configs)
+    service_config = await get_nginx_service_config(service, replica_configs, repo)
     await nginx.register(service_config, (await repo.get_config()).acme_settings)
     return replica_failures
 
@@ -305,7 +308,9 @@ async def stop_replica_connections(
 
 
 async def get_nginx_service_config(
-    service: models.Service, replicas: Iterable[ReplicaConfig]
+    service: models.Service,
+    replicas: Iterable[ReplicaConfig],
+    repo: Optional[GatewayProxyRepo] = None,
 ) -> ServiceConfig:
     limit_req_zones: list[LimitReqZoneConfig] = []
     locations: list[LocationConfig] = []
@@ -367,6 +372,7 @@ async def get_nginx_service_config(
         domain=service.domain_safe,
         https=service.https_safe,
         project_name=service.project_name,
+        run_name=service.run_name,
         auth=service.auth,
         client_max_body_size=service.client_max_body_size,
         access_log_path=ACCESS_LOG_PATH,

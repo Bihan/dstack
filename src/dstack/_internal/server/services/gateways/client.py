@@ -89,16 +89,19 @@ class GatewayClient:
         ssh_head_proxy_private_key: Optional[str],
     ):
         assert run.run_spec.configuration.type == "service"
-        payload = {
-            "job_id": job_submission.id.hex,
-            "app_port": get_service_port(job_spec, run.run_spec.configuration),
-            "ssh_head_proxy": ssh_head_proxy.dict() if ssh_head_proxy is not None else None,
-            "ssh_head_proxy_private_key": ssh_head_proxy_private_key,
-        }
         jpd = job_submission.job_provisioning_data
         assert jpd is not None
         assert jpd.hostname is not None
         assert jpd.ssh_port is not None
+
+        payload = {
+            "job_id": job_submission.id.hex,
+            "app_port": get_service_port(job_spec, run.run_spec.configuration),
+            "internal_ip": jpd.internal_ip,
+            "ssh_head_proxy": ssh_head_proxy.dict() if ssh_head_proxy is not None else None,
+            "ssh_head_proxy_private_key": ssh_head_proxy_private_key,
+        }
+
         if not jpd.dockerized:
             payload.update(
                 {

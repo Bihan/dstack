@@ -83,6 +83,7 @@ async def register_replica(
         repo=repo,
         nginx=nginx,
         service_conn_pool=service_conn_pool,
+        internal_ip=body.internal_ip,
     )
     return OkResponse()
 

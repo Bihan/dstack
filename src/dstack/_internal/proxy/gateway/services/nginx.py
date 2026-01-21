@@ -104,20 +104,26 @@ class Nginx:
         self, conf: SiteConfig, acme: ACMESettings, repo: Optional[GatewayProxyRepo] = None
     ) -> None:
         logger.debug("Registering %s domain %s", conf.type, conf.domain)
+        logger.debug("ServiceConfig Check: %s", conf.dict())
         conf_name = self.get_config_name(conf.domain)
         async with self._lock:
             if conf.https:
                 await run_async(self.run_certbot, conf.domain, acme)
-
+            logger.debug("ServiceConfig router")
             if isinstance(conf, ServiceConfig) and conf.router:
                 if conf.router.type == RouterType.SGLANG:
+                    logger.debug(
+                        "SGLang router detected, repo: %s, replicas count: %d",
+                        repo is not None,
+                        len(conf.replicas),
+                    )
                     # Check if router already exists for this domain
                     if repo:
                         for replica in conf.replicas:
                             ip = await repo.get_replica_internal_ip(
                                 conf.project_name, conf.run_name, replica.id
                             )
-                            logger.info("Replica %s internal IP: %s", replica.id, ip)
+                            logger.info("Replica Info %s internal IP: %s", replica.id, ip)
                     if conf.domain in self._domain_to_router:
                         # Router already exists, reuse it
                         router = self._domain_to_router[conf.domain]

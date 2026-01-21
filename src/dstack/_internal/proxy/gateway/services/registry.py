@@ -265,7 +265,7 @@ async def apply_service(
         for replica, conn in replica_conns.items()
     ]
     service_config = await get_nginx_service_config(service, replica_configs, repo)
-    await nginx.register(service_config, (await repo.get_config()).acme_settings)
+    await nginx.register(service_config, (await repo.get_config()).acme_settings, repo)
     return replica_failures
 
 

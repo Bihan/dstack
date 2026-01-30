@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 import subprocess
 import sys
@@ -10,11 +11,13 @@ import psutil
 
 from dstack._internal.core.models.routers import RouterType, SGLangRouterConfig
 from dstack._internal.proxy.lib.errors import UnexpectedProxyError
+from dstack._internal.utils.common import run_async
 from dstack._internal.utils.logging import get_logger
 
 from .base import Router, RouterContext
 
 logger = get_logger(__name__)
+MAX_WORKER_WAIT = 30 * 60  # 30 minutes
 
 
 class SglangRouter(Router):
@@ -68,6 +71,8 @@ class SglangRouter(Router):
                 "--policy",
                 self.config.policy,
             ]
+            if self.config.pd_disaggregation:
+                cmd.append("--pd-disaggregation")
 
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -140,7 +145,7 @@ class SglangRouter(Router):
         for replica_url in replica_urls:
             self._remove_worker_from_router(replica_url)
 
-    def update_replicas(self, replica_urls: List[str]) -> None:
+    async def update_replicas(self, replica_urls: List[str]) -> None:
         """Update replicas for service, replacing the current set."""
         # Query router to get current worker URLs
         current_workers = self._get_router_workers()
@@ -172,9 +177,9 @@ class SglangRouter(Router):
                 self.context.port,
             )
 
-        # Add workers
+        # Add workers: poll /server_info and register with discovered type
         for worker_url in sorted(workers_to_add):
-            success = self._add_worker_to_router(worker_url)
+            success = await self.register_worker(worker_url)
             if not success:
                 logger.warning("Failed to add worker %s, continuing with others", worker_url)
 
@@ -197,9 +202,17 @@ class SglangRouter(Router):
             logger.exception("Error getting sglang router workers")
             return []
 
-    def _add_worker_to_router(self, worker_url: str) -> bool:
+    def add_worker_to_router(
+        self,
+        url: str,
+        worker_type: str = "regular",
+        bootstrap_port: Optional[int] = None,
+    ) -> bool:
+        """Add a worker to the SGLang router with the given type and optional bootstrap port."""
         try:
-            payload = {"url": worker_url, "worker_type": "regular"}
+            payload: dict = {"url": url, "worker_type": worker_type}
+            if bootstrap_port is not None:
+                payload["bootstrap_port"] = bootstrap_port
             with httpx.Client(timeout=5.0) as client:
                 response = client.post(
                     f"http://{self.context.host}:{self.context.port}/workers",
@@ -209,8 +222,9 @@ class SglangRouter(Router):
                     response_data = response.json()
                     if response_data.get("status") == "accepted":
                         logger.info(
-                            "Worker %s accepted by sglang router on port %s",
-                            worker_url,
+                            "Worker %s (type=%s) accepted by sglang router on port %s",
+                            url,
+                            worker_type,
                             self.context.port,
                         )
                         return True
@@ -224,13 +238,96 @@ class SglangRouter(Router):
                 else:
                     logger.error(
                         "Failed to add worker %s: status %d, %s",
-                        worker_url,
+                        url,
                         response.status_code,
                         response.text,
                     )
                     return False
         except Exception:
-            logger.exception("Error adding worker %s", worker_url)
+            logger.exception("Error adding worker %s", url)
+            return False
+
+    async def wait_for_ready_and_register(self, url: str) -> bool:
+        server_info_url = f"{url}/server_info"
+        poll_interval = 5
+        deadline = time.monotonic() + MAX_WORKER_WAIT
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            while time.monotonic() < deadline:
+                try:
+                    resp = await client.get(server_info_url)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("status") == "ready":
+                            disaggregation_mode = data["disaggregation_mode"]
+                            if disaggregation_mode == "prefill":
+                                worker_type = "prefill"
+                                bootstrap_port = data["disaggregation_bootstrap_port"]
+                            elif disaggregation_mode == "decode":
+                                worker_type = "decode"
+                                bootstrap_port = None
+                            else:
+                                worker_type = "regular"
+                                bootstrap_port = None
+
+                            logger.info(
+                                "Status is ready for worker %s (type=%s), now registering.",
+                                url,
+                                worker_type,
+                            )
+                            await run_async(
+                                self.add_worker_to_router,
+                                url,
+                                worker_type,
+                                bootstrap_port,
+                            )
+                            return True
+                except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as e:
+                    logger.debug(
+                        "Worker %s not ready yet: %s",
+                        url,
+                        e,
+                    )
+                logger.debug("Waiting for worker %s to become ready", url)
+                await asyncio.sleep(poll_interval)
+
+        logger.warning("Timeout waiting for worker %s to be ready", url)
+        return False
+
+    async def register_worker(self, url: str) -> bool:
+        """Register worker with one attempt (no polling). Returns True if ready and added."""
+        server_info_url = f"{url}/server_info"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(server_info_url)
+                if resp.status_code != 200:
+                    return False
+                data = resp.json()
+                if data.get("status") != "ready":
+                    return False
+                disaggregation_mode = data.get("disaggregation_mode", "")
+                if disaggregation_mode == "prefill":
+                    worker_type = "prefill"
+                    bootstrap_port = data.get("disaggregation_bootstrap_port")
+                elif disaggregation_mode == "decode":
+                    worker_type = "decode"
+                    bootstrap_port = None
+                else:
+                    worker_type = "regular"
+                    bootstrap_port = None
+                logger.info(
+                    "Registering worker %s (type=%s)",
+                    url,
+                    worker_type,
+                )
+                return await run_async(
+                    self.add_worker_to_router,
+                    url,
+                    worker_type,
+                    bootstrap_port,
+                )
+        except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as e:
+            logger.debug("Worker %s not ready: %s", url, e)
             return False
 
     def _remove_worker_from_router(self, worker_url: str) -> bool:

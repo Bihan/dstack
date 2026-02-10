@@ -151,9 +151,9 @@ class Nginx:
                     if conf.router.pd_disaggregation:
                         # PD path: replica_urls from internal_ip (router talks directly to workers)
                         replica_urls = [
-                            f"http://{r.internal_ip}:{r.port}"
-                            for r in conf.replicas
-                            if r.internal_ip
+                            f"http://{replica.internal_ip}:{replica.port}"
+                            for replica in conf.replicas
+                            if replica.internal_ip
                         ]
                         self._domain_to_worker_urls[conf.domain] = replica_urls
                     else:

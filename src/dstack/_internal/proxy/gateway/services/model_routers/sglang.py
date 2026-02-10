@@ -3,7 +3,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.parse
 from typing import List, Optional
 
 import httpx
@@ -326,16 +325,26 @@ class SglangRouter(Router):
                     worker_type,
                     bootstrap_port,
                 )
-        except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as e:
-            logger.debug("Worker %s not ready: %s", url, e)
+        except Exception:
+            logger.exception("Error adding worker %s", url)
             return False
 
     def _remove_worker_from_router(self, worker_url: str) -> bool:
         try:
-            encoded_url = urllib.parse.quote(worker_url, safe="")
+            current_workers = self._get_router_workers()
+            worker_id = None
+            for worker in current_workers:
+                url = worker.get("url")
+                if url and isinstance(url, str) and url == worker_url:
+                    worker_id = worker.get("id")
+                    if worker_id and isinstance(worker_id, str):
+                        break
+            if not worker_id:
+                logger.warning("No worker id found for url %s", worker_url)
+                return False
             with httpx.Client(timeout=5.0) as client:
                 response = client.delete(
-                    f"http://{self.context.host}:{self.context.port}/workers/{encoded_url}"
+                    f"http://{self.context.host}:{self.context.port}/workers/{worker_id}"
                 )
                 if response.status_code == 202:
                     response_data = response.json()

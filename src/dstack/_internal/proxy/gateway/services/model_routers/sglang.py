@@ -1,4 +1,3 @@
-import asyncio
 import shutil
 import subprocess
 import sys
@@ -16,7 +15,6 @@ from dstack._internal.utils.logging import get_logger
 from .base import Router, RouterContext
 
 logger = get_logger(__name__)
-MAX_WORKER_WAIT = 30 * 60  # 30 minutes
 
 
 class SglangRouter(Router):
@@ -245,53 +243,6 @@ class SglangRouter(Router):
         except Exception:
             logger.exception("Error adding worker %s", url)
             return False
-
-    async def wait_for_ready_and_register(self, url: str) -> bool:
-        server_info_url = f"{url}/server_info"
-        poll_interval = 5
-        deadline = time.monotonic() + MAX_WORKER_WAIT
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            while time.monotonic() < deadline:
-                try:
-                    resp = await client.get(server_info_url)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data.get("status") == "ready":
-                            disaggregation_mode = data["disaggregation_mode"]
-                            if disaggregation_mode == "prefill":
-                                worker_type = "prefill"
-                                bootstrap_port = data["disaggregation_bootstrap_port"]
-                            elif disaggregation_mode == "decode":
-                                worker_type = "decode"
-                                bootstrap_port = None
-                            else:
-                                worker_type = "regular"
-                                bootstrap_port = None
-
-                            logger.info(
-                                "Status is ready for worker %s (type=%s), now registering.",
-                                url,
-                                worker_type,
-                            )
-                            await run_async(
-                                self.add_worker_to_router,
-                                url,
-                                worker_type,
-                                bootstrap_port,
-                            )
-                            return True
-                except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as e:
-                    logger.debug(
-                        "Worker %s not ready yet: %s",
-                        url,
-                        e,
-                    )
-                logger.debug("Waiting for worker %s to become ready", url)
-                await asyncio.sleep(poll_interval)
-
-        logger.warning("Timeout waiting for worker %s to be ready", url)
-        return False
 
     async def register_worker(self, url: str) -> bool:
         """Register worker with one attempt (no polling). Returns True if ready and added."""

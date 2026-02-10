@@ -108,10 +108,6 @@ class Router(ABC):
         """
         raise NotImplementedError
 
-    async def wait_for_ready_and_register(self, url: str) -> bool:
-        """Poll until worker is ready, then add to router. Returns True if registered."""
-        raise NotImplementedError
-
     async def register_worker(self, url: str) -> bool:
         """Register worker with one attempt (no polling). Returns True if ready and added."""
         raise NotImplementedError

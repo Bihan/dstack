@@ -481,6 +481,19 @@ class ComputeWithGatewaySupport(ABC):
         """
         pass
 
+    def apply_gateway_networking_for_instance(
+        self,
+        instance_id: str,
+        region: str,
+        backend_data: Optional[str] = None,
+    ) -> None:
+        """
+        Apply gateway-specific networking (firewall rules, tags) to an existing
+        instance. Called when a fleet gateway job gets an instance, so the instance
+        receives the same network setup as backend-provisioned gateways.
+        """
+        pass
+
 
 class ComputeWithPrivateGatewaySupport:
     """
@@ -1060,6 +1073,50 @@ def get_dstack_gateway_commands(router: Optional[AnyGatewayRouterConfig] = None)
         "python3 -m venv /home/ubuntu/dstack/green",
         f"/home/ubuntu/dstack/blue/bin/pip install '{gateway_package}'",
         "sudo /home/ubuntu/dstack/blue/bin/python -m dstack.gateway.systemd install --run",
+    ]
+
+
+def get_gateway_container_commands(
+    authorized_keys: List[str], router: Optional[AnyGatewayRouterConfig] = None
+) -> List[str]:
+    """
+    Commands to run a gateway inside a container (e.g. ubuntu:22.04).
+    Used by fleet gateways and Kubernetes backend.
+    """
+    import shlex
+
+    authorized_keys_content = "\n".join(authorized_keys).strip()
+    gateway_commands = " && ".join(get_dstack_gateway_commands(router=router))
+    quoted_gateway_commands = shlex.quote(gateway_commands)
+
+    return [
+        # install packages
+        "apt-get update && apt-get install -y sudo wget openssh-server nginx python3.10-venv libaugeas0",
+        # install docker-systemctl-replacement
+        "wget https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/b18d67e521f0d1cf1d705dbb8e0416bef23e377c/files/docker/systemctl3.py -O /usr/bin/systemctl",
+        "chmod a+rx /usr/bin/systemctl",
+        # install certbot
+        "python3 -m venv /root/certbotvenv/",
+        "/root/certbotvenv/bin/pip install certbot-nginx",
+        "ln -s /root/certbotvenv/bin/certbot /usr/bin/certbot",
+        # prohibit password authentication
+        'sed -i "s/.*PasswordAuthentication.*/PasswordAuthentication no/g" /etc/ssh/sshd_config',
+        # set up ubuntu user
+        "useradd -mUG sudo ubuntu",
+        "echo 'ubuntu ALL=(ALL:ALL) NOPASSWD: ALL' | tee /etc/sudoers.d/ubuntu",
+        # create ssh dirs and add public key
+        "mkdir -p /run/sshd /home/ubuntu/.ssh",
+        "chmod 700 /home/ubuntu/.ssh",
+        f"echo '{authorized_keys_content}' > /home/ubuntu/.ssh/authorized_keys",
+        "chmod 600 /home/ubuntu/.ssh/authorized_keys",
+        "chown -R ubuntu:ubuntu /home/ubuntu/.ssh",
+        # regenerate host keys
+        "rm -rf /etc/ssh/ssh_host_*",
+        "ssh-keygen -A > /dev/null",
+        # install gateway
+        f"su ubuntu -c {quoted_gateway_commands}",
+        # start docker-systemctl-replacement as init (PID 1)
+        "exec systemctl default",
     ]
 
 

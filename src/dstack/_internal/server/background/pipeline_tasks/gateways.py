@@ -32,6 +32,7 @@ from dstack._internal.server.services import backends as backends_services
 from dstack._internal.server.services import events
 from dstack._internal.server.services import gateways as gateways_services
 from dstack._internal.server.services.gateways import emit_gateway_status_change_event
+from dstack._internal.server.services.gateways.fleet import submit_fleet_gateway_run
 from dstack._internal.server.services.gateways.pool import gateway_connections_pool
 from dstack._internal.server.services.locking import get_locker
 from dstack._internal.server.services.logging import fmt
@@ -268,6 +269,36 @@ class _SubmittedResult:
 async def _process_submitted_gateway(gateway_model: GatewayModel) -> _SubmittedResult:
     logger.info("%s: started gateway provisioning", fmt(gateway_model))
     configuration = gateways_services.get_gateway_configuration(gateway_model)
+
+    if configuration.fleets is not None:
+        if gateway_model.run_id is None:
+            try:
+                async with get_session_ctx() as session:
+                    res = await session.execute(
+                        select(GatewayModel)
+                        .where(GatewayModel.id == gateway_model.id)
+                        .options(
+                            joinedload(GatewayModel.project).joinedload(ProjectModel.owner),
+                            joinedload(GatewayModel.created_by_user),
+                        )
+                    )
+                    gw = res.unique().scalar_one()
+                    await submit_fleet_gateway_run(
+                        session=session,
+                        gateway_model=gw,
+                        configuration=configuration,
+                    )
+                    await session.commit()
+            except Exception as e:
+                logger.exception("%s: failed to create fleet gateway run", fmt(gateway_model))
+                return _SubmittedResult(
+                    update_map={
+                        "status": GatewayStatus.FAILED,
+                        "status_message": f"Failed to create gateway run: {repr(e)}",
+                    }
+                )
+        return _SubmittedResult(update_map={})
+
     try:
         (
             backend_model,
@@ -431,7 +462,10 @@ async def _process_to_be_deleted_item(item: GatewayPipelineItem):
                 GatewayModel.id == item.id,
                 GatewayModel.lock_token == item.lock_token,
             )
-            .options(joinedload(GatewayModel.project).joinedload(ProjectModel.backends))
+            .options(
+                joinedload(GatewayModel.project).joinedload(ProjectModel.backends),
+                joinedload(GatewayModel.project).joinedload(ProjectModel.owner),
+            )
             .options(joinedload(GatewayModel.gateway_compute))
             .options(joinedload(GatewayModel.backend).load_only(BackendModel.type))
         )
@@ -516,6 +550,37 @@ class _DeletedResult:
 
 
 async def _process_to_be_deleted_gateway(gateway_model: GatewayModel) -> _DeletedResult:
+    if gateway_model.backend is None:
+        # Fleet gateway - stop the run, then delete the gateway
+        if gateway_model.run_id is not None:
+            try:
+                from dstack._internal.server.services.runs import stop_runs
+
+                run_name = f"gateway-{gateway_model.name}"
+                async with get_session_ctx() as session:
+                    await stop_runs(
+                        session=session,
+                        user=gateway_model.project.owner,
+                        project=gateway_model.project,
+                        runs_names=[run_name],
+                        abort=True,
+                    )
+                    await session.commit()
+            except Exception as e:
+                logger.exception(
+                    "Failed to stop fleet gateway run for %s: %s",
+                    gateway_model.name,
+                    e,
+                )
+                return _DeletedResult(delete_gateway=False)
+        if gateway_model.gateway_compute is not None:
+            await gateway_connections_pool.remove(gateway_model.gateway_compute.ip_address)
+        return _DeletedResult(
+            delete_gateway=True,
+            gateway_compute_update_map=(
+                {"active": False, "deleted": True} if gateway_model.gateway_compute else {}
+            ),
+        )
     assert gateway_model.backend.type != BackendType.DSTACK
     backend = await backends_services.get_project_backend_by_type_or_error(
         project=gateway_model.project, backend_type=gateway_model.backend.type

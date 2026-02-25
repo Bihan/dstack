@@ -1,6 +1,9 @@
 import concurrent.futures
 import json
+import os
 import re
+import subprocess
+import tempfile
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -74,10 +77,18 @@ from dstack._internal.core.models.volumes import (
     VolumeAttachmentData,
     VolumeProvisioningData,
 )
+from dstack._internal.core.services.ssh.client import get_ssh_client_info
 from dstack._internal.utils.common import get_or_error
 from dstack._internal.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+# UFW commands to allow HTTP/HTTPS for fleet gateways (traffic filtered on host before container)
+_GATEWAY_UFW_ALLOW_COMMANDS = [
+    "sudo ufw allow 80/tcp",
+    "sudo ufw allow 443/tcp",
+    "sudo ufw --force enable",
+]
 
 # pd-balanced disks can be 10GB-64TB, but dstack images are 20GB and cannot grow larger
 # than 32TB because of filesystem settings
@@ -641,6 +652,148 @@ class GCPCompute(
             region=configuration.region,
             backend_data=backend_data,
         )
+
+    def apply_gateway_networking_for_instance(
+        self,
+        instance_id: str,
+        region: str,
+        backend_data: Optional[str] = None,
+        *,
+        hostname: Optional[str] = None,
+        ssh_private_key: Optional[str] = None,
+        ssh_user: Optional[str] = None,
+        ssh_port: Optional[int] = None,
+    ) -> None:
+        zone = region
+        if backend_data is not None:
+            backend_data_dict = json.loads(backend_data)
+            zone = backend_data_dict.get("zone", region)
+        if self.config.vpc_project_id is None:
+            gcp_resources.create_gateway_firewall_rules(
+                firewalls_client=self.firewalls_client,
+                project_id=self.config.project_id,
+                network=self.config.vpc_resource_name,
+            )
+        instance = self.instances_client.get(
+            project=self.config.project_id,
+            zone=zone,
+            instance=instance_id,
+        )
+        current_items = list(instance.tags.items) if instance.tags else []
+        if gcp_resources.DSTACK_GATEWAY_TAG not in current_items:
+            new_items = current_items + [gcp_resources.DSTACK_GATEWAY_TAG]
+            tags_resource = compute_v1.Tags(items=new_items)
+            if instance.tags is not None and instance.tags.fingerprint:
+                tags_resource.fingerprint = instance.tags.fingerprint
+            request = compute_v1.SetTagsInstanceRequest(
+                project=self.config.project_id,
+                zone=zone,
+                instance=instance_id,
+                tags_resource=tags_resource,
+            )
+            operation = self.instances_client.set_tags(request=request)
+            gcp_resources.wait_for_extended_operation(operation, "set gateway tags")
+
+        if hostname and ssh_private_key and ssh_user:
+            self._apply_gateway_ufw_via_ssh(
+                hostname=hostname,
+                ssh_private_key=ssh_private_key,
+                ssh_user=ssh_user,
+                ssh_port=ssh_port or 22,
+            )
+        else:
+            logger.info(
+                "Skipping UFW setup for instance %s: hostname=%s ssh_key=%s ssh_user=%s",
+                instance_id,
+                "set" if hostname else "MISSING",
+                "set" if ssh_private_key else "MISSING",
+                "set" if ssh_user else "MISSING",
+            )
+
+    def _apply_gateway_ufw_via_ssh(
+        self,
+        hostname: str,
+        ssh_private_key: str,
+        ssh_user: str,
+        ssh_port: int,
+    ) -> None:
+        """SSH into the host and allow UFW ports 80/443 for fleet gateway HTTP/HTTPS traffic."""
+        logger.info(
+            "Attempting UFW setup for fleet gateway: %s@%s:%d",
+            ssh_user,
+            hostname,
+            ssh_port,
+        )
+        remote_cmd = " && ".join(_GATEWAY_UFW_ALLOW_COMMANDS)
+        try:
+            ssh_info = get_ssh_client_info()
+        except Exception as e:
+            logger.warning("Cannot get SSH client for gateway UFW setup: %s", e)
+            return
+        with tempfile.TemporaryDirectory() as tmpdir:
+            key_path = os.path.join(tmpdir, "identity")
+            try:
+                with open(
+                    key_path,
+                    opener=lambda path, flags: os.open(path, flags, 0o600),
+                    mode="w",
+                ) as f:
+                    f.write(ssh_private_key)
+            except OSError as e:
+                logger.warning("Cannot write SSH key for gateway UFW setup: %s", e)
+                return
+            cmd = [
+                str(ssh_info.path),
+                "-i",
+                key_path,
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "ConnectTimeout=10",
+                "-p",
+                str(ssh_port),
+                f"{ssh_user}@{hostname}",
+                remote_cmd,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    logger.warning(
+                        "Gateway UFW setup failed (exit %d) for %s: stdout=%r stderr=%r",
+                        result.returncode,
+                        hostname,
+                        result.stdout,
+                        result.stderr,
+                    )
+                    return
+                if result.stderr and "Could not load host key" not in result.stderr:
+                    logger.debug(
+                        "Gateway UFW setup stderr for %s: %s",
+                        hostname,
+                        result.stderr,
+                    )
+                logger.info(
+                    "Successfully applied UFW allow 80/443 for fleet gateway at %s",
+                    hostname,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Gateway UFW setup timed out for %s",
+                    hostname,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to apply UFW rules for fleet gateway at %s: %s",
+                    hostname,
+                    e,
+                )
 
     def register_volume(self, volume: Volume) -> VolumeProvisioningData:
         logger.debug("Requesting persistent disk %s", volume.configuration.volume_id)

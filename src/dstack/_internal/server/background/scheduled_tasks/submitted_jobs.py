@@ -79,6 +79,7 @@ from dstack._internal.server.models import (
     VolumeModel,
 )
 from dstack._internal.server.services import events
+from dstack._internal.server.services import gateways as gateways_services
 from dstack._internal.server.services.backends import get_project_backend_by_type_or_error
 from dstack._internal.server.services.fleets import (
     check_can_create_new_cloud_instance_in_fleet,
@@ -384,6 +385,12 @@ async def _process_submitted_job(
             job_model=job_model,
             multinode=multinode,
         )
+        if instance is not None:
+            await gateways_services.try_create_fleet_gateway_compute_from_job(
+                session=session,
+                run_model=run_model,
+                job_model=job_model,
+            )
         job_model.last_processed_at = common_utils.get_current_datetime()
         await session.commit()
         return
@@ -402,6 +409,11 @@ async def _process_submitted_job(
         )
         instance = res.unique().scalar_one()
         switch_job_status(session, job_model, JobStatus.PROVISIONING)
+        await gateways_services.try_create_fleet_gateway_compute_from_job(
+            session=session,
+            run_model=run_model,
+            job_model=job_model,
+        )
     else:
         if run_profile.creation_policy == CreationPolicy.REUSE:
             logger.debug("%s: reuse instance failed", fmt(job_model))
@@ -506,6 +518,11 @@ async def _process_submitted_job(
                 offer, multinode
             ).json()
             session.add(instance)
+            await gateways_services.try_create_fleet_gateway_compute_from_job(
+                session=session,
+                run_model=run_model,
+                job_model=provisioned_job_model,
+            )
             events.emit(
                 session,
                 f"Instance created for job. Instance status: {instance.status.upper()}",

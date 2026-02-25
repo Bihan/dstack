@@ -42,9 +42,15 @@ def get_gateways_table(
         table.add_column("ERROR")
 
     for gateway in gateways:
+        if gateway.configuration.fleets is not None:
+            backend_str = f"fleet: {', '.join(gateway.configuration.fleets)}"
+        elif gateway.configuration.backend is not None:
+            backend_str = f"{gateway.configuration.backend.value} ({gateway.configuration.region})"
+        else:
+            backend_str = "-"
         row = {
             "NAME": gateway.name,
-            "BACKEND": f"{gateway.configuration.backend.value} ({gateway.configuration.region})",
+            "BACKEND": backend_str,
             "HOSTNAME": gateway.hostname,
             "DOMAIN": gateway.wildcard_domain,
             "DEFAULT": "✓" if gateway.default else "",

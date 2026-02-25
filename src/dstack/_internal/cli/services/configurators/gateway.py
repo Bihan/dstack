@@ -219,8 +219,11 @@ def _print_plan_header(plan: GatewayPlan):
     if plan.spec.configuration.domain is not None:
         domain = plan.spec.configuration.domain
 
-    configuration_table.add_row(th("Backend"), plan.spec.configuration.backend.value)
-    configuration_table.add_row(th("Region"), plan.spec.configuration.region)
+    if plan.spec.configuration.fleets is not None:
+        configuration_table.add_row(th("Fleets"), ", ".join(plan.spec.configuration.fleets))
+    else:
+        configuration_table.add_row(th("Backend"), plan.spec.configuration.backend.value)
+    configuration_table.add_row(th("Region"), plan.spec.configuration.region or "-")
     configuration_table.add_row(th("Domain"), domain)
 
     console.print(configuration_table)

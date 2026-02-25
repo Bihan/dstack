@@ -3,7 +3,7 @@ import uuid
 from enum import Enum
 from typing import Dict, Optional, Union
 
-from pydantic import Field, validator
+from pydantic import Field, root_validator, validator
 from typing_extensions import Annotated, Literal
 
 from dstack._internal.core.models.backends.base import BackendType
@@ -50,8 +50,24 @@ class GatewayConfiguration(CoreModel):
     type: Literal["gateway"] = "gateway"
     name: Annotated[Optional[str], Field(description="The gateway name")] = None
     default: Annotated[bool, Field(description="Make the gateway default")] = False
-    backend: Annotated[BackendType, Field(description="The gateway backend")]
-    region: Annotated[str, Field(description="The gateway region")]
+    backend: Annotated[
+        Optional[BackendType],
+        Field(
+            description="The gateway backend. Required when not using fleet. Omit when using fleet."
+        ),
+    ] = None
+    fleets: Annotated[
+        Optional[list[str]],
+        Field(
+            description="The fleets considered for running the gateway. When set, the gateway runs as a job on one of these fleets instead of being provisioned by a backend."
+        ),
+    ] = None
+    region: Annotated[
+        Optional[str],
+        Field(
+            description="The gateway region. Required when using backend. Ignored when using fleet."
+        ),
+    ] = None
     instance_type: Annotated[
         Optional[str],
         Field(
@@ -94,6 +110,18 @@ class GatewayConfiguration(CoreModel):
     ] = None
 
     _validate_tags = validator("tags", pre=True, allow_reuse=True)(tags_validator)
+
+    @root_validator
+    def validate_fleets_or_backend(cls, values):
+        fleets = values.get("fleets")
+        backend = values.get("backend")
+        if (fleets is None or len(fleets) == 0) == (backend is None):
+            raise ValueError("Either 'fleets' or 'backend with region' must be set")
+        if fleets is not None and len(fleets) == 0:
+            raise ValueError("'fleets' must be non-empty when set")
+        if backend is not None and values.get("region") is None:
+            raise ValueError("'region' is required when using backend")
+        return values
 
 
 class GatewaySpec(CoreModel):

@@ -1,10 +1,9 @@
 import random
-import shlex
 import subprocess
 import tempfile
 import time
 from enum import Enum
-from typing import List, Optional
+from typing import Optional
 
 from gpuhunt import AcceleratorVendor
 from kubernetes import client
@@ -19,7 +18,7 @@ from dstack._internal.core.backends.base.compute import (
     generate_unique_gateway_instance_name,
     generate_unique_instance_name_for_job,
     get_docker_commands,
-    get_dstack_gateway_commands,
+    get_gateway_container_commands,
 )
 from dstack._internal.core.backends.kubernetes.models import (
     KubernetesConfig,
@@ -66,7 +65,6 @@ from dstack._internal.core.models.instances import (
 )
 from dstack._internal.core.models.placement import PlacementGroup
 from dstack._internal.core.models.resources import CPUSpec, GPUSpec
-from dstack._internal.core.models.routers import AnyGatewayRouterConfig
 from dstack._internal.core.models.runs import Job, JobProvisioningData, Requirements, Run
 from dstack._internal.core.models.volumes import Volume
 from dstack._internal.utils.common import get_or_error
@@ -380,7 +378,7 @@ class KubernetesCompute(
                 " gateway configuration property"
             )
         instance_name = generate_unique_gateway_instance_name(configuration)
-        commands = _get_gateway_commands(
+        commands = get_gateway_container_commands(
             authorized_keys=[configuration.ssh_key_pub], router=configuration.router
         )
         pod = client.V1Pod(
@@ -861,49 +859,6 @@ def _wait_for_load_balancer_address(
             logger.warning("Timeout waiting for load balancer %s to get ip", service_name)
             return None
         time.sleep(1)
-
-
-def _get_gateway_commands(
-    authorized_keys: List[str], router: Optional[AnyGatewayRouterConfig] = None
-) -> List[str]:
-    authorized_keys_content = "\n".join(authorized_keys).strip()
-    gateway_commands = " && ".join(get_dstack_gateway_commands(router=router))
-    quoted_gateway_commands = shlex.quote(gateway_commands)
-
-    commands = [
-        # install packages
-        "apt-get update && apt-get install -y sudo wget openssh-server nginx python3.10-venv libaugeas0",
-        # install docker-systemctl-replacement
-        "wget https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement/b18d67e521f0d1cf1d705dbb8e0416bef23e377c/files/docker/systemctl3.py -O /usr/bin/systemctl",
-        "chmod a+rx /usr/bin/systemctl",
-        # install certbot
-        "python3 -m venv /root/certbotvenv/",
-        "/root/certbotvenv/bin/pip install certbot-nginx",
-        "ln -s /root/certbotvenv/bin/certbot /usr/bin/certbot",
-        # prohibit password authentication
-        'sed -i "s/.*PasswordAuthentication.*/PasswordAuthentication no/g" /etc/ssh/sshd_config',
-        # set up ubuntu user
-        "useradd -mUG sudo ubuntu",
-        "echo 'ubuntu ALL=(ALL:ALL) NOPASSWD: ALL' | tee /etc/sudoers.d/ubuntu",
-        # create ssh dirs and add public key
-        "mkdir -p /run/sshd /home/ubuntu/.ssh",
-        "chmod 700 /home/ubuntu/.ssh",
-        f"echo '{authorized_keys_content}' > /home/ubuntu/.ssh/authorized_keys",
-        "chmod 600 /home/ubuntu/.ssh/authorized_keys",
-        "chown -R ubuntu:ubuntu /home/ubuntu/.ssh",
-        # regenerate host keys
-        "rm -rf /etc/ssh/ssh_host_*",
-        "ssh-keygen -A > /dev/null",
-        # install gateway
-        f"su ubuntu -c {quoted_gateway_commands}",
-        # start docker-systemctl-replacement as an init replacement (PID 1), which
-        # - starts and supervises enabled services (sshd, nginx, dstack.gateway)
-        # - stops running services on SIGTERM (graceful shutdown)
-        # - reaps orphan processes
-        # See: https://github.com/gdraheim/docker-systemctl-replacement/blob/b18d67e521f0d1cf1d705dbb8e0416bef23e377c/INIT-DAEMON.md
-        "exec systemctl default",
-    ]
-    return commands
 
 
 def _run_ssh_command(

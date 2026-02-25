@@ -416,10 +416,20 @@ class RunModel(BaseModel):
         back_populates="run", lazy="selectin", order_by="[JobModel.replica_num, JobModel.job_num]"
     )
 
+    # Gateway that this run USES (e.g. a service run routes traffic through this gateway).
+    # FK: RunModel.gateway_id -> GatewayModel.id
     gateway_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("gateways.id", ondelete="SET NULL")
     )
-    gateway: Mapped[Optional["GatewayModel"]] = relationship()
+    gateway: Mapped[Optional["GatewayModel"]] = relationship(foreign_keys=[gateway_id])
+
+    # Gateway that this run IS (e.g. a fleet gateway runs as a job; GatewayModel.run_id -> this run).
+    # FK: GatewayModel.run_id -> RunModel.id. Use when this run implements a gateway on a fleet.
+    gateway_run: Mapped[Optional["GatewayModel"]] = relationship(
+        back_populates="run",
+        primaryjoin="RunModel.id == GatewayModel.run_id",
+        viewonly=True,
+    )
 
     __table_args__ = (Index("ix_submitted_at_id", submitted_at.desc(), id),)
 
@@ -512,15 +522,35 @@ class GatewayModel(PipelineModelMixin, BaseModel):
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
     project: Mapped["ProjectModel"] = relationship(foreign_keys=[project_id])
-    backend_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("backends.id", ondelete="CASCADE"))
-    backend: Mapped["BackendModel"] = relationship()
+    # User who created the gateway; used for SSH keys (e.g. fleet gateway host_ssh_keys).
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by_user: Mapped[Optional["UserModel"]] = relationship()
+    backend_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("backends.id", ondelete="CASCADE"), nullable=True
+    )
+    backend: Mapped[Optional["BackendModel"]] = relationship()
+
+    # For fleet gateways: the run that runs this gateway as a job.
+    # Links to RunModel.gateway_run.
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("runs.id", use_alter=True, ondelete="CASCADE"), nullable=True, index=True
+    )
+    run: Mapped[Optional["RunModel"]] = relationship(
+        back_populates="gateway_run",
+        foreign_keys=[run_id],
+    )
 
     gateway_compute_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("gateway_computes.id", ondelete="CASCADE")
     )
     gateway_compute: Mapped[Optional["GatewayComputeModel"]] = relationship()
 
-    runs: Mapped[List["RunModel"]] = relationship(back_populates="gateway")
+    runs: Mapped[List["RunModel"]] = relationship(
+        back_populates="gateway",
+        foreign_keys="[RunModel.gateway_id]",
+    )
 
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_gateways_project_id_name"),)
 

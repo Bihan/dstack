@@ -539,7 +539,9 @@ async def submit_run(
         )
 
         if run_spec.configuration.type == "service":
-            await services.register_service(session, run_model, run_spec)
+            # Fleet gateway runs (run_name starts with "gateway-") are the gateway themselves.
+            if not run_spec.run_name.startswith("gateway-"):
+                await services.register_service(session, run_model, run_spec)
             service_config = run_spec.configuration
 
             global_replica_num = 0  # Global counter across all groups for unique replica_num

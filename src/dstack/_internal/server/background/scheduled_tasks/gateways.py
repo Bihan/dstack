@@ -11,7 +11,9 @@ from dstack._internal.server.models import (
     BackendModel,
     GatewayComputeModel,
     GatewayModel,
+    JobModel,
     ProjectModel,
+    RunModel,
 )
 from dstack._internal.server.services import backends as backends_services
 from dstack._internal.server.services import gateways as gateways_services
@@ -21,6 +23,7 @@ from dstack._internal.server.services.gateways import (
     gateway_connections_pool,
     switch_gateway_status,
 )
+from dstack._internal.server.services.gateways.fleet import submit_fleet_gateway_run
 from dstack._internal.server.services.locking import advisory_lock_ctx, get_locker
 from dstack._internal.server.services.logging import fmt
 from dstack._internal.server.utils import sentry_utils
@@ -113,12 +116,52 @@ async def _process_submitted_gateway(session: AsyncSession, gateway_model: Gatew
     res = await session.execute(
         select(GatewayModel)
         .where(GatewayModel.id == gateway_model.id)
-        .options(joinedload(GatewayModel.project).joinedload(ProjectModel.backends))
+        .options(
+            joinedload(GatewayModel.project).joinedload(ProjectModel.backends),
+            joinedload(GatewayModel.project).joinedload(ProjectModel.owner),
+        )
         .options(joinedload(GatewayModel.backend).load_only(BackendModel.type))
         .execution_options(populate_existing=True)
     )
     gateway_model = res.unique().scalar_one()
     configuration = gateways_services.get_gateway_configuration(gateway_model)
+
+    if configuration.fleets is not None:
+        if gateway_model.run_id is None:
+            try:
+                await submit_fleet_gateway_run(
+                    session=session,
+                    gateway_model=gateway_model,
+                    configuration=configuration,
+                )
+            except Exception as e:
+                logger.exception("%s: failed to create fleet gateway run", fmt(gateway_model))
+                gateway_model.status_message = f"Failed to create gateway run: {repr(e)}"
+                switch_gateway_status(session, gateway_model, GatewayStatus.FAILED)
+        else:
+            # Create GatewayComputeModel when job's instance gets hostname
+            res = await session.execute(
+                select(RunModel, JobModel)
+                .join(JobModel, JobModel.run_id == RunModel.id)
+                .where(
+                    RunModel.id == gateway_model.run_id,
+                    JobModel.instance_id.isnot(None),
+                    JobModel.job_provisioning_data.isnot(None),
+                )
+                .options(joinedload(JobModel.instance))
+                .execution_options(populate_existing=True)
+            )
+            row = res.unique().first()
+            if row is not None:
+                run_model, job_model = row
+                await gateways_services.try_create_fleet_gateway_compute_from_job(
+                    session=session,
+                    run_model=run_model,
+                    job_model=job_model,
+                )
+        return
+
+    assert configuration.backend is not None  # validated: exactly one of fleet or backend
     try:
         (
             backend_model,

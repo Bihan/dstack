@@ -38,6 +38,7 @@ from dstack._internal.core.models.gateways import (
     GatewayStatus,
     LetsEncryptGatewayCertificate,
 )
+from dstack._internal.core.models.runs import JobProvisioningData
 from dstack._internal.core.services import validate_dstack_resource_name
 from dstack._internal.server import settings
 from dstack._internal.server.db import get_db, is_db_postgres, is_db_sqlite
@@ -45,7 +46,10 @@ from dstack._internal.server.models import (
     BackendModel,
     GatewayComputeModel,
     GatewayModel,
+    InstanceModel,
+    JobModel,
     ProjectModel,
+    RunModel,
     UserModel,
 )
 from dstack._internal.server.services import events
@@ -54,8 +58,13 @@ from dstack._internal.server.services.backends import (
     get_project_backend_by_type_or_error,
     get_project_backend_with_model_by_type_or_error,
 )
+from dstack._internal.server.services.fleets import get_project_fleet_model_by_name
 from dstack._internal.server.services.gateways.connection import GatewayConnection
 from dstack._internal.server.services.gateways.pool import gateway_connections_pool
+from dstack._internal.server.services.instances import (
+    get_instance_remote_connection_info,
+    get_instance_ssh_private_keys,
+)
 from dstack._internal.server.services.locking import (
     advisory_lock_ctx,
     get_locker,
@@ -65,6 +74,7 @@ from dstack._internal.server.services.pipelines import PipelineHinterProtocol
 from dstack._internal.server.services.plugins import apply_plugin_policies
 from dstack._internal.server.utils.common import gather_map_async
 from dstack._internal.settings import FeatureFlags
+from dstack._internal.utils import common as common_utils
 from dstack._internal.utils.common import get_current_datetime, run_async
 from dstack._internal.utils.crypto import generate_rsa_key_pair_bytes
 from dstack._internal.utils.logging import get_logger
@@ -159,6 +169,8 @@ async def create_gateway_compute(
 ) -> GatewayComputeModel:
     assert isinstance(backend_compute, ComputeWithGatewaySupport)
     assert configuration.name is not None
+    assert configuration.backend is not None
+    assert configuration.region is not None
 
     private_bytes, public_bytes = generate_rsa_key_pair_bytes()
     gateway_ssh_private_key = private_bytes.decode()
@@ -195,6 +207,211 @@ async def create_gateway_compute(
     )
 
 
+def _get_fleet_gateway_connectable_hostname(
+    instance_model: Optional[InstanceModel],
+    job_provisioning_data: JobProvisioningData,
+) -> Optional[str]:
+    """
+    Resolve the hostname to use for SSH connection to a fleet gateway instance.
+    Uses InstanceModel.remote_connection_info for SSH instances (avoids using
+    instance_id which may be a pod/container name).
+    Never uses instance_id as fallback since it's often not resolvable (e.g. K8s pod names).
+    """
+    rci = get_instance_remote_connection_info(instance_model) if instance_model else None
+    if rci is not None:
+        return rci.host
+    return job_provisioning_data.hostname
+
+
+async def _apply_gateway_networking_if_supported(
+    project: ProjectModel,
+    backend: BackendType,
+    instance_id: str,
+    region: str,
+    backend_data: Optional[str],
+    *,
+    hostname: Optional[str] = None,
+    ssh_private_key: Optional[str] = None,
+    ssh_user: Optional[str] = None,
+    ssh_port: Optional[int] = None,
+) -> None:
+    """Apply backend-specific gateway networking for fleet gateways. No-op if backend doesn't support it."""
+    logger.info(
+        "Applying gateway networking for fleet gateway instance %s (backend=%s, region=%s)",
+        instance_id,
+        backend,
+        region,
+    )
+    try:
+        _, backend_obj = await get_project_backend_with_model_by_type_or_error(
+            project=project, backend_type=backend
+        )
+    except Exception as e:
+        logger.warning(
+            "Cannot apply gateway networking: project %s has no backend %s configured: %s",
+            project.name,
+            backend,
+            e,
+        )
+        return
+    compute = backend_obj.compute()
+    if not isinstance(compute, ComputeWithGatewaySupport):
+        logger.debug(
+            "Compute %s does not support gateway networking, skipping",
+            type(compute).__name__,
+        )
+        return
+    method = getattr(
+        compute,
+        "apply_gateway_networking_for_instance",
+        None,
+    )
+    if method is not None and callable(method):
+        try:
+            await run_async(
+                method,
+                instance_id,
+                region,
+                backend_data,
+                hostname=hostname,
+                ssh_private_key=ssh_private_key,
+                ssh_user=ssh_user,
+                ssh_port=ssh_port,
+            )
+            logger.info(
+                "Applied gateway networking for instance %s (backend=%s)",
+                instance_id,
+                backend,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to apply gateway networking for instance %s: %s",
+                instance_id,
+                e,
+            )
+    else:
+        logger.debug(
+            "Backend %s has no apply_gateway_networking_for_instance override",
+            backend,
+        )
+
+
+async def try_create_fleet_gateway_compute_from_job(
+    session: AsyncSession,
+    run_model: RunModel,
+    job_model: JobModel,
+) -> bool:
+    """
+    If the run implements a fleet gateway and the job has an instance with
+    a resolvable hostname, create GatewayComputeModel and switch gateway to PROVISIONING.
+    Returns True if GatewayComputeModel was created.
+    """
+    if job_model.job_provisioning_data is None:
+        return False
+
+    res = await session.execute(
+        select(JobModel)
+        .where(JobModel.id == job_model.id)
+        .options(
+            joinedload(JobModel.instance).joinedload(InstanceModel.project),
+        )
+    )
+    job_model = res.unique().scalar_one()
+    if job_model.instance is None:
+        return False
+
+    res = await session.execute(
+        select(GatewayModel)
+        .where(GatewayModel.run_id == run_model.id)
+        .options(
+            joinedload(GatewayModel.project).joinedload(ProjectModel.backends),
+        )
+        .execution_options(populate_existing=True)
+    )
+    gateway_model = res.unique().scalar_one_or_none()
+    if gateway_model is None or gateway_model.gateway_compute_id is not None:
+        return False
+
+    configuration = get_gateway_configuration(gateway_model)
+    jpd = JobProvisioningData.__response__.parse_raw(job_model.job_provisioning_data)
+
+    instance_model = job_model.instance
+    if instance_model is None:
+        return False
+    hostname = _get_fleet_gateway_connectable_hostname(instance_model, jpd)
+    if not hostname:
+        return False
+
+    # Apply backend-specific gateway networking (e.g. GCP firewall rules and tags)
+    instance_ssh_private_key, _ = get_instance_ssh_private_keys(instance_model)
+    logger.info(
+        "Fleet gateway networking: hostname=%s ssh_user=%s ssh_port=%s ssh_key=%s",
+        hostname,
+        jpd.username,
+        jpd.ssh_port,
+        "present" if instance_ssh_private_key else "MISSING",
+    )
+    await _apply_gateway_networking_if_supported(
+        project=gateway_model.project,
+        backend=jpd.backend,
+        instance_id=jpd.instance_id,
+        region=jpd.region,
+        backend_data=jpd.backend_data,
+        hostname=hostname,
+        ssh_private_key=instance_ssh_private_key,
+        ssh_user=jpd.username,
+        ssh_port=jpd.ssh_port,
+    )
+
+    gateway_compute = create_fleet_gateway_compute_from_instance(
+        gateway_model=gateway_model,
+        instance_model=instance_model,
+        job_provisioning_data=jpd,
+        configuration=configuration,
+        connectable_hostname=hostname,
+    )
+    session.add(gateway_compute)
+    await session.flush()
+    gateway_model.gateway_compute = gateway_compute
+    switch_gateway_status(session, gateway_model, GatewayStatus.PROVISIONING)
+    return True
+
+
+def create_fleet_gateway_compute_from_instance(
+    gateway_model: GatewayModel,
+    instance_model: InstanceModel,
+    job_provisioning_data: JobProvisioningData,
+    configuration: GatewayConfiguration,
+    connectable_hostname: str,
+) -> GatewayComputeModel:
+    instance_ssh_private_key, _ = get_instance_ssh_private_keys(instance_model)
+    project_ssh_public_key = common_utils.get_or_error(gateway_model.project.ssh_public_key)
+
+    compute_configuration = GatewayComputeConfiguration(
+        project_name=gateway_model.project.name,
+        instance_name=configuration.name or gateway_model.name,
+        backend=job_provisioning_data.backend,
+        region=job_provisioning_data.region,
+        instance_type=None,
+        public_ip=job_provisioning_data.public_ip_enabled,
+        ssh_key_pub=project_ssh_public_key,
+        certificate=configuration.certificate,
+        tags=configuration.tags,
+        router=configuration.router,
+    )
+    return GatewayComputeModel(
+        backend_id=None,
+        region=job_provisioning_data.region,
+        ip_address=connectable_hostname,
+        instance_id=job_provisioning_data.instance_id,
+        hostname=connectable_hostname,
+        configuration=compute_configuration.json(),
+        backend_data=job_provisioning_data.backend_data,
+        ssh_private_key=instance_ssh_private_key,
+        ssh_public_key=project_ssh_public_key,
+    )
+
+
 async def create_gateway(
     session: AsyncSession,
     user: UserModel,
@@ -209,11 +426,20 @@ async def create_gateway(
         spec=GatewaySpec(configuration=configuration),
     )
     configuration = spec.configuration
-    _validate_gateway_configuration(configuration)
-
-    backend_model, _ = await get_project_backend_with_model_by_type_or_error(
-        project=project, backend_type=configuration.backend
+    await _validate_gateway_configuration(
+        session=session, project=project, configuration=configuration
     )
+
+    if configuration.fleets is not None:
+        region = "fleet"
+        backend_id = None
+    else:
+        backend_type = common_utils.get_or_error(configuration.backend)
+        backend_model, _ = await get_project_backend_with_model_by_type_or_error(
+            project=project, backend_type=backend_type
+        )
+        region = common_utils.get_or_error(configuration.region)
+        backend_id = backend_model.id
 
     lock_namespace = f"gateway_names_{project.name}"
     if is_db_sqlite():
@@ -232,9 +458,10 @@ async def create_gateway(
         gateway = GatewayModel(
             id=uuid.uuid4(),
             name=configuration.name,
-            region=configuration.region,
+            region=region,
             project_id=project.id,
-            backend_id=backend_model.id,
+            backend_id=backend_id,
+            created_by_user_id=user.id,
             wildcard_domain=configuration.domain,
             configuration=configuration.json(),
             status=GatewayStatus.SUBMITTED,
@@ -362,7 +589,10 @@ async def _delete_gateways_pipeline(
                 "Failed to delete gateways: gateways are being processed currently. Try again later."
             )
         for gateway_model in gateway_models:
-            if gateway_model.backend.type == BackendType.DSTACK:
+            if (
+                gateway_model.backend is not None
+                and gateway_model.backend.type == BackendType.DSTACK
+            ):
                 raise ServerClientError("Cannot delete dstack Sky gateway")
         for gateway_model in gateway_models:
             if not gateway_model.to_be_deleted:
@@ -410,6 +640,40 @@ async def _delete_gateways_sync(
         )
         gateway_models = res.scalars().all()
         for gateway_model in gateway_models:
+            if gateway_model.backend is None:
+                # Fleet gateway: stop the run, remove connection, delete
+                if gateway_model.run_id is not None:
+                    from dstack._internal.server.services.runs import stop_runs
+
+                    run_name = f"gateway-{gateway_model.name}"
+                    try:
+                        await stop_runs(
+                            session=session,
+                            user=user,
+                            project=project,
+                            runs_names=[run_name],
+                            abort=True,
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "Failed to stop fleet gateway run for %s: %s",
+                            gateway_model.name,
+                            e,
+                        )
+                        continue
+                if gateway_model.gateway_compute is not None:
+                    await gateway_connections_pool.remove(gateway_model.gateway_compute.ip_address)
+                    gateway_model.gateway_compute.active = False
+                    gateway_model.gateway_compute.deleted = True
+                    session.add(gateway_model.gateway_compute)
+                await session.delete(gateway_model)
+                events.emit(
+                    session,
+                    "Gateway deleted",
+                    actor=events.UserActor.from_user(user),
+                    targets=[events.Target.from_model(gateway_model)],
+                )
+                continue
             backend = await get_project_backend_by_type_or_error(
                 project=project, backend_type=gateway_model.backend.type
             )
@@ -462,7 +726,7 @@ async def set_gateway_wildcard_domain(
     ) as gateway:
         if gateway is None:
             raise ResourceNotExistsError()
-        if gateway.backend.type == BackendType.DSTACK:
+        if gateway.backend is not None and gateway.backend.type == BackendType.DSTACK:
             raise ServerClientError("Custom domains for dstack Sky gateway are not supported")
         old_domain = gateway.wildcard_domain
         if old_domain != wildcard_domain:
@@ -763,11 +1027,13 @@ async def configure_gateway(
 def get_gateway_configuration(gateway_model: GatewayModel) -> GatewayConfiguration:
     if gateway_model.configuration is not None:
         return GatewayConfiguration.__response__.parse_raw(gateway_model.configuration)
-    # Handle gateways created before GatewayConfiguration was introduced
+    # Handle gateways created before GatewayConfiguration was introduced.
+    # backend can be None for fleet gateways (backend_id is nullable).
+    backend = gateway_model.backend.type if gateway_model.backend is not None else None
     return GatewayConfiguration(
         name=gateway_model.name,
         default=False,
-        backend=gateway_model.backend.type,
+        backend=backend,
         region=gateway_model.region,
         domain=gateway_model.wildcard_domain,
     )
@@ -783,6 +1049,8 @@ def get_gateway_compute_configuration(
             gateway_model.gateway_compute.configuration
         )
     # Handle gateways created before GatewayComputeConfiguration was introduced
+    if gateway_model.backend is None:
+        return None
     return GatewayComputeConfiguration(
         project_name=gateway_model.project.name,
         instance_name=gateway_model.gateway_compute.instance_id,
@@ -804,9 +1072,18 @@ def gateway_model_to_gateway(gateway_model: GatewayModel) -> Gateway:
         hostname = gateway_model.gateway_compute.hostname
         if hostname is None:
             hostname = ip_address
-    backend_type = gateway_model.backend.type
-    if gateway_model.backend.type == BackendType.DSTACK:
-        backend_type = BackendType.AWS
+    # For backend gateways: use gateway.backend. For fleet gateways (backend=None), use
+    # gateway_compute.backend if available (the instance was provisioned on that backend).
+    backend_type = None
+    if gateway_model.backend is not None:
+        backend_type = gateway_model.backend.type
+        if gateway_model.backend.type == BackendType.DSTACK:
+            backend_type = BackendType.AWS
+    elif (
+        gateway_model.gateway_compute is not None
+        and gateway_model.gateway_compute.backend is not None
+    ):
+        backend_type = gateway_model.gateway_compute.backend.type
     configuration = get_gateway_configuration(gateway_model)
     configuration.default = gateway_model.project.default_gateway_id == gateway_model.id
     return Gateway(
@@ -826,32 +1103,51 @@ def gateway_model_to_gateway(gateway_model: GatewayModel) -> Gateway:
     )
 
 
-def _validate_gateway_configuration(configuration: GatewayConfiguration):
-    check_backend_type_available(configuration.backend)
-    if configuration.backend not in BACKENDS_WITH_GATEWAY_SUPPORT:
-        raise ServerClientError(
-            f"Gateways are not supported for {configuration.backend.value} backend."
-            " Available backends with gateway support:"
-            f" {[b.value for b in BACKENDS_WITH_GATEWAY_SUPPORT]}."
-        )
+async def _validate_gateway_configuration(
+    session: AsyncSession,
+    project: ProjectModel,
+    configuration: GatewayConfiguration,
+) -> None:
+    """Validate configuration before creating a gateway."""
+    if configuration.fleets is not None:
+        for fleet_name in configuration.fleets:
+            fleet_model = await get_project_fleet_model_by_name(
+                session=session,
+                project=project,
+                name=fleet_name,
+            )
+            if fleet_model is None:
+                raise ResourceNotExistsError(f"Fleet {fleet_name} does not exist")
+    else:
+        assert configuration.backend is not None
+        check_backend_type_available(configuration.backend)
+        if configuration.backend not in BACKENDS_WITH_GATEWAY_SUPPORT:
+            raise ServerClientError(
+                f"Gateways are not supported for {configuration.backend.value} backend."
+                " Available backends with gateway support:"
+                f" {[b.value for b in BACKENDS_WITH_GATEWAY_SUPPORT]}."
+            )
+
+        if (
+            not configuration.public_ip
+            and configuration.backend not in BACKENDS_WITH_PRIVATE_GATEWAY_SUPPORT
+        ):
+            raise ServerClientError(
+                f"Private gateways are not supported for {configuration.backend.value} backend. "
+                " Available backends with private gateway support:"
+                f" {[b.value for b in BACKENDS_WITH_PRIVATE_GATEWAY_SUPPORT]}."
+            )
+
+        if configuration.certificate is not None:
+            if configuration.certificate.type == "lets-encrypt" and not configuration.public_ip:
+                raise ServerClientError(
+                    "lets-encrypt certificate type is not supported for private gateways"
+                )
+            if (
+                configuration.certificate.type == "acm"
+                and configuration.backend != BackendType.AWS
+            ):
+                raise ServerClientError("acm certificate type is supported for aws backend only")
 
     if configuration.name is not None:
         validate_dstack_resource_name(configuration.name)
-
-    if (
-        not configuration.public_ip
-        and configuration.backend not in BACKENDS_WITH_PRIVATE_GATEWAY_SUPPORT
-    ):
-        raise ServerClientError(
-            f"Private gateways are not supported for {configuration.backend.value} backend. "
-            " Available backends with private gateway support:"
-            f" {[b.value for b in BACKENDS_WITH_PRIVATE_GATEWAY_SUPPORT]}."
-        )
-
-    if configuration.certificate is not None:
-        if configuration.certificate.type == "lets-encrypt" and not configuration.public_ip:
-            raise ServerClientError(
-                "lets-encrypt certificate type is not supported for private gateways"
-            )
-        if configuration.certificate.type == "acm" and configuration.backend != BackendType.AWS:
-            raise ServerClientError("acm certificate type is supported for aws backend only")

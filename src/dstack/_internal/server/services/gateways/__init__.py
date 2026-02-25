@@ -24,6 +24,7 @@ from dstack._internal.core.backends.features import (
     BACKENDS_WITH_PRIVATE_GATEWAY_SUPPORT,
 )
 from dstack._internal.core.errors import (
+    BackendNotAvailable,
     GatewayError,
     ResourceNotExistsError,
     ServerClientError,
@@ -363,12 +364,22 @@ async def try_create_fleet_gateway_compute_from_job(
         ssh_port=jpd.ssh_port,
     )
 
+    backend_id = None
+    try:
+        backend_model, _ = await get_project_backend_with_model_by_type_or_error(
+            project=gateway_model.project, backend_type=jpd.backend
+        )
+        backend_id = backend_model.id
+    except BackendNotAvailable:
+        pass
+
     gateway_compute = create_fleet_gateway_compute_from_instance(
         gateway_model=gateway_model,
         instance_model=instance_model,
         job_provisioning_data=jpd,
         configuration=configuration,
         connectable_hostname=hostname,
+        backend_id=backend_id,
     )
     session.add(gateway_compute)
     await session.flush()
@@ -383,6 +394,7 @@ def create_fleet_gateway_compute_from_instance(
     job_provisioning_data: JobProvisioningData,
     configuration: GatewayConfiguration,
     connectable_hostname: str,
+    backend_id: Optional[uuid.UUID] = None,
 ) -> GatewayComputeModel:
     instance_ssh_private_key, _ = get_instance_ssh_private_keys(instance_model)
     project_ssh_public_key = common_utils.get_or_error(gateway_model.project.ssh_public_key)
@@ -400,7 +412,7 @@ def create_fleet_gateway_compute_from_instance(
         router=configuration.router,
     )
     return GatewayComputeModel(
-        backend_id=None,
+        backend_id=backend_id,
         region=job_provisioning_data.region,
         ip_address=connectable_hostname,
         instance_id=job_provisioning_data.instance_id,

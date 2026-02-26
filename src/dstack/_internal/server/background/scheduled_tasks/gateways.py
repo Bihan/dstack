@@ -154,14 +154,34 @@ async def _process_submitted_gateway(session: AsyncSession, gateway_model: Gatew
             row = res.unique().first()
             if row is not None:
                 run_model, job_model = row
-                await gateways_services.try_create_fleet_gateway_compute_from_job(
-                    session=session,
-                    run_model=run_model,
-                    job_model=job_model,
-                )
+                try:
+                    gateway_compute = (
+                        await gateways_services.create_fleet_gateway_compute_from_job(
+                            session=session,
+                            run_model=run_model,
+                            job_model=job_model,
+                        )
+                    )
+                    if gateway_compute is not None:
+                        gateway_model.gateway_compute = gateway_compute
+                        session.add(gateway_model)
+                        switch_gateway_status(session, gateway_model, GatewayStatus.PROVISIONING)
+                except BackendError as e:
+                    status_message = f"Backend error: {repr(e)}"
+                    if len(e.args) > 0:
+                        status_message = str(e.args[0])
+                    gateway_model.status_message = status_message
+                    switch_gateway_status(session, gateway_model, GatewayStatus.FAILED)
+                except Exception as e:
+                    logger.exception(
+                        "%s: got exception when creating fleet gateway compute",
+                        fmt(gateway_model),
+                    )
+                    gateway_model.status_message = f"Unexpected error: {repr(e)}"
+                    switch_gateway_status(session, gateway_model, GatewayStatus.FAILED)
         return
 
-    assert configuration.backend is not None  # validated: exactly one of fleet or backend
+    assert configuration.backend is not None
     try:
         (
             backend_model,

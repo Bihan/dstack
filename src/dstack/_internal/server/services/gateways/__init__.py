@@ -297,18 +297,47 @@ async def _apply_gateway_networking_if_supported(
         )
 
 
-async def try_create_fleet_gateway_compute_from_job(
+async def _attach_gateway_compute(
+    session: AsyncSession,
+    gateway_model: GatewayModel,
+    gateway_compute: GatewayComputeModel,
+) -> None:
+    """Persist gateway compute and switch gateway to PROVISIONING."""
+    session.add(gateway_compute)
+    await session.flush()
+    gateway_model.gateway_compute = gateway_compute
+    switch_gateway_status(session, gateway_model, GatewayStatus.PROVISIONING)
+
+
+async def attach_fleet_gateway_compute(
+    session: AsyncSession,
+    run_model: RunModel,
+    gateway_compute: GatewayComputeModel,
+) -> None:
+    """Look up gateway by run_id and attach gateway_compute."""
+    res = await session.execute(select(GatewayModel).where(GatewayModel.run_id == run_model.id))
+    gateway_model = res.unique().scalar_one_or_none()
+    if gateway_model is not None:
+        await _attach_gateway_compute(
+            session=session,
+            gateway_model=gateway_model,
+            gateway_compute=gateway_compute,
+        )
+
+
+async def create_fleet_gateway_compute_from_job(
     session: AsyncSession,
     run_model: RunModel,
     job_model: JobModel,
-) -> bool:
+) -> Optional[GatewayComputeModel]:
     """
     If the run implements a fleet gateway and the job has an instance with
-    a resolvable hostname, create GatewayComputeModel and switch gateway to PROVISIONING.
-    Returns True if GatewayComputeModel was created.
+    a resolvable hostname, create GatewayComputeModel (in memory only).
+    Returns the GatewayComputeModel when created, None otherwise.
+    Caller is responsible for persisting (assign, session.add, switch_gateway_status).
     """
     if job_model.job_provisioning_data is None:
-        return False
+        return None
 
     res = await session.execute(
         select(JobModel)
@@ -319,7 +348,7 @@ async def try_create_fleet_gateway_compute_from_job(
     )
     job_model = res.unique().scalar_one()
     if job_model.instance is None:
-        return False
+        return None
 
     res = await session.execute(
         select(GatewayModel)
@@ -331,17 +360,17 @@ async def try_create_fleet_gateway_compute_from_job(
     )
     gateway_model = res.unique().scalar_one_or_none()
     if gateway_model is None or gateway_model.gateway_compute_id is not None:
-        return False
+        return None
 
     configuration = get_gateway_configuration(gateway_model)
     jpd = JobProvisioningData.__response__.parse_raw(job_model.job_provisioning_data)
 
     instance_model = job_model.instance
     if instance_model is None:
-        return False
+        return None
     hostname = _get_fleet_gateway_connectable_hostname(instance_model, jpd)
     if not hostname:
-        return False
+        return None
 
     # Apply backend-specific gateway networking (e.g. GCP firewall rules and tags)
     instance_ssh_private_key, _ = get_instance_ssh_private_keys(instance_model)
@@ -381,11 +410,7 @@ async def try_create_fleet_gateway_compute_from_job(
         connectable_hostname=hostname,
         backend_id=backend_id,
     )
-    session.add(gateway_compute)
-    await session.flush()
-    gateway_model.gateway_compute = gateway_compute
-    switch_gateway_status(session, gateway_model, GatewayStatus.PROVISIONING)
-    return True
+    return gateway_compute
 
 
 def create_fleet_gateway_compute_from_instance(

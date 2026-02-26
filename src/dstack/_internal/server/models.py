@@ -423,14 +423,6 @@ class RunModel(BaseModel):
     )
     gateway: Mapped[Optional["GatewayModel"]] = relationship(foreign_keys=[gateway_id])
 
-    # Gateway that this run IS (e.g. a fleet gateway runs as a job; GatewayModel.run_id -> this run).
-    # FK: GatewayModel.run_id -> RunModel.id. Use when this run implements a gateway on a fleet.
-    gateway_run: Mapped[Optional["GatewayModel"]] = relationship(
-        back_populates="run",
-        primaryjoin="RunModel.id == GatewayModel.run_id",
-        viewonly=True,
-    )
-
     __table_args__ = (Index("ix_submitted_at_id", submitted_at.desc(), id),)
 
 
@@ -533,14 +525,10 @@ class GatewayModel(PipelineModelMixin, BaseModel):
     backend: Mapped[Optional["BackendModel"]] = relationship()
 
     # For fleet gateways: the run that runs this gateway as a job.
-    # Links to RunModel.gateway_run.
     run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("runs.id", use_alter=True, ondelete="CASCADE"), nullable=True, index=True
     )
-    run: Mapped[Optional["RunModel"]] = relationship(
-        back_populates="gateway_run",
-        foreign_keys=[run_id],
-    )
+    run: Mapped[Optional["RunModel"]] = relationship(foreign_keys=[run_id])
 
     gateway_compute_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("gateway_computes.id", ondelete="CASCADE")

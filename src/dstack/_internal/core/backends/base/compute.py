@@ -1080,8 +1080,8 @@ def get_gateway_container_commands(
     authorized_keys: List[str], router: Optional[AnyGatewayRouterConfig] = None
 ) -> List[str]:
     """
-    Commands to run a gateway inside a container (e.g. ubuntu:22.04).
-    Used by fleet gateways and Kubernetes backend.
+    Commands to run a gateway inside a container.
+    Used by fleet gateways.
     """
     import shlex
 

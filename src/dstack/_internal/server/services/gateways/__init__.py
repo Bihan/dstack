@@ -332,9 +332,8 @@ async def create_fleet_gateway_compute_from_job(
 ) -> Optional[GatewayComputeModel]:
     """
     If the run implements a fleet gateway and the job has an instance with
-    a resolvable hostname, create GatewayComputeModel (in memory only).
-    Returns the GatewayComputeModel when created, None otherwise.
-    Caller is responsible for persisting (assign, session.add, switch_gateway_status).
+    a resolvable hostname. Returns the GatewayComputeModel when created,
+    None otherwise.
     """
     if job_model.job_provisioning_data is None:
         return None

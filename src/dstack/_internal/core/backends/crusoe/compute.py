@@ -247,8 +247,10 @@ class CrusoeCompute(
                     {"disk_id": data_disk_id, "mode": "read-write", "attachment_type": "data"}
                 ]
 
+            # Only pass host_channel_adapters for IB-capable instances. CPU/PCIe instances
+            # in heterogeneous fleets stay in the same region but cannot join the IB partition.
             host_channel_adapters = None
-            if ib_partition_id:
+            if ib_partition_id and _is_ib_type(instance_type_name):
                 host_channel_adapters = [{"ib_partition_id": ib_partition_id}]
 
             create_op = self._client.create_vm(

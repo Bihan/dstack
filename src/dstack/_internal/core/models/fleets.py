@@ -206,12 +206,34 @@ class FleetNodesSpec(CoreModel):
         return values
 
 
+class NodeGroup(CoreModel):
+    """
+    Spec for a single node group in a heterogeneous fleet.
+    Each group has its own min/target/max and resources.
+    """
+
+    count: Annotated[
+        FleetNodesSpec,
+        Field(description="The number of instances in this node group"),
+    ]
+
+    resources: Annotated[
+        Optional[ResourcesSpec],
+        Field(description="The resources requirements for instances in this group"),
+    ] = None
+
+    @property
+    def nodes(self) -> FleetNodesSpec:
+        """Alias for count. Required for pydantic-duality NodeGroupRequest compatibility."""
+        return self.count
+
+
 class InstanceGroupParamsConfig(CoreConfig):
     @staticmethod
     def schema_extra(schema: Dict[str, Any]):
         add_extra_schema_types(
             schema["properties"]["nodes"],
-            extra_types=[{"type": "integer"}, {"type": "string"}],
+            extra_types=[{"type": "integer"}, {"type": "string"}, {"type": "array"}],
         )
         add_extra_schema_types(
             schema["properties"]["idle_duration"],
@@ -230,7 +252,13 @@ class InstanceGroupParams(CoreModel):
     ] = None
 
     nodes: Annotated[
-        Optional[FleetNodesSpec], Field(description="The number of instances in cloud fleet")
+        Optional[Union[FleetNodesSpec, List[NodeGroup]]],
+        Field(
+            description=(
+                "The number of instances in cloud fleet (FleetNodesSpec) or a list of node groups "
+                "with group-specific resources (List[NodeGroup])"
+            )
+        ),
     ] = None
     placement: Annotated[
         Optional[InstanceGroupPlacement],
@@ -316,18 +344,39 @@ class InstanceGroupParams(CoreModel):
     ] = None
 
     @validator("nodes", pre=True)
-    def parse_nodes(cls, v: Optional[Union[dict, str]]) -> Optional[dict]:
+    def parse_nodes(cls, v: Optional[Union[dict, str, list]]) -> Optional[Union[dict, list]]:
+        if isinstance(v, list):
+            return v
         if isinstance(v, str) and ".." in v:
             v = v.replace(" ", "")
-            min, max = v.split("..")
-            return dict(min=min or None, max=max or None)
-        elif isinstance(v, str) or isinstance(v, int):
+            min_val, max_val = v.split("..")
+            return dict(min=min_val or None, max=max_val or None)
+        if isinstance(v, str) or isinstance(v, int):
             return dict(min=v, max=v)
         return v
 
     _validate_idle_duration = validator("idle_duration", pre=True, allow_reuse=True)(
         parse_idle_duration
     )
+
+    @property
+    def node_groups(self) -> List[NodeGroup]:
+        """
+        Normalize nodes to a list of NodeGroup.
+        For homogeneous fleets (nodes is FleetNodesSpec), returns a single group.
+        For heterogeneous fleets (nodes is List[NodeGroup]), returns the list.
+        """
+        if self.nodes is None:
+            return []
+        if isinstance(self.nodes, list):
+            return list(self.nodes)
+        # Homogeneous: single group with top-level nodes and resources
+        return [
+            NodeGroup(
+                count=self.nodes,
+                resources=self.resources,
+            )
+        ]
 
 
 class FleetProps(CoreModel):

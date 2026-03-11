@@ -686,6 +686,9 @@ class InstanceModel(PipelineModelMixin, BaseModel):
         foreign_keys=[fleet_id],
     )
 
+    node_group_index: Mapped[int] = mapped_column(Integer, default=0)
+    """Index of the node group this instance belongs to. Used for heterogeneous fleets."""
+
     compute_group_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("compute_groups.id"))
     compute_group: Mapped[Optional["ComputeGroupModel"]] = relationship(back_populates="instances")
 

@@ -20,11 +20,13 @@ from dstack._internal.server.models import (
 )
 from dstack._internal.server.services import events
 from dstack._internal.server.services.fleets import (
+    _fleet_spec_allows_zero_min,
     create_fleet_instance_model,
     get_fleet_spec,
     get_next_instance_num,
     is_fleet_empty,
     is_fleet_in_use,
+    iter_node_groups_in_creation_order,
     switch_fleet_status,
 )
 from dstack._internal.server.services.instances import switch_instance_status
@@ -198,60 +200,74 @@ def _maintain_fleet_nodes_in_min_max_range(
     fleet_spec: FleetSpec,
 ) -> bool:
     """
-    Ensures the fleet has at least `nodes.min` and at most `nodes.max` instances.
+    Ensures the fleet has at least nodes.min and at most nodes.max instances per node group.
     Returns `True` if retried, added new instances, or terminated redundant instances and `False` otherwise.
     """
     assert fleet_spec.configuration.nodes is not None
+
     for instance in fleet_model.instances:
         # Delete terminated but not deleted instances since
         # they are going to be replaced with new pending instances.
         if instance.status == InstanceStatus.TERMINATED and not instance.deleted:
             instance.deleted = True
             instance.deleted_at = get_current_datetime()
-    active_instances = [i for i in fleet_model.instances if not i.deleted]
-    active_instances_num = len(active_instances)
-    if active_instances_num >= fleet_spec.configuration.nodes.min:
-        if (
-            fleet_spec.configuration.nodes.max is None
-            or active_instances_num <= fleet_spec.configuration.nodes.max
-        ):
-            return False
-        # Fleet has more instances than allowed by nodes.max.
-        # This is possible due to race conditions (e.g. provisioning jobs in a fleet concurrently)
-        # or if nodes.max is updated.
-        nodes_redundant = active_instances_num - fleet_spec.configuration.nodes.max
-        for instance in fleet_model.instances:
-            if nodes_redundant == 0:
-                break
-            if instance.status in [InstanceStatus.IDLE]:
-                instance.termination_reason = InstanceTerminationReason.MAX_INSTANCES_LIMIT
-                instance.termination_reason_message = "Fleet has too many instances"
-                switch_instance_status(session, instance, InstanceStatus.TERMINATING)
-                nodes_redundant -= 1
-        return True
-    nodes_missing = fleet_spec.configuration.nodes.min - active_instances_num
-    for i in range(nodes_missing):
-        instance_model = create_fleet_instance_model(
-            session=session,
-            project=fleet_model.project,
-            # TODO: Store fleet.user and pass it instead of the project owner.
-            username=fleet_model.project.owner.name,
-            spec=fleet_spec,
-            instance_num=get_next_instance_num({i.instance_num for i in active_instances}),
-        )
-        events.emit(
-            session,
-            (
-                "Instance created to meet target fleet node count."
-                f" Status: {instance_model.status.upper()}"
-            ),
-            actor=events.SystemActor(),
-            targets=[events.Target.from_model(instance_model)],
-        )
-        active_instances.append(instance_model)
-        fleet_model.instances.append(instance_model)
-    logger.info("Added %s instances to fleet %s", nodes_missing, fleet_model.name)
-    return True
+
+    all_active = [i for i in fleet_model.instances if not i.deleted]
+    taken_instance_nums = {i.instance_num for i in all_active}
+    changed = False
+
+    for group_idx, group in iter_node_groups_in_creation_order(fleet_spec):
+        group_active = [i for i in all_active if i.node_group_index == group_idx]
+        active_num = len(group_active)
+
+        if active_num < group.count.min:
+            nodes_missing = group.count.min - active_num
+            for _ in range(nodes_missing):
+                instance_num = get_next_instance_num(taken_instance_nums)
+                instance_model = create_fleet_instance_model(
+                    session=session,
+                    project=fleet_model.project,
+                    username=fleet_model.project.owner.name,
+                    spec=fleet_spec,
+                    instance_num=instance_num,
+                    node_group_index=group_idx,
+                )
+                events.emit(
+                    session,
+                    (
+                        "Instance created to meet target fleet node count."
+                        f" Status: {instance_model.status.upper()}"
+                    ),
+                    actor=events.SystemActor(),
+                    targets=[events.Target.from_model(instance_model)],
+                )
+                instance_model.fleet_id = fleet_model.id
+                fleet_model.instances.append(instance_model)
+                all_active.append(instance_model)
+                taken_instance_nums.add(instance_num)
+            logger.info(
+                "Added %s instances to fleet %s (group %s)",
+                nodes_missing,
+                fleet_model.name,
+                group_idx,
+            )
+            changed = True
+        elif group.count.max is not None and active_num > group.count.max:
+            # Fleet has more instances than allowed by nodes.max.
+            # This is possible due to race conditions (e.g. provisioning jobs in a fleet concurrently)
+            # or if nodes.max is updated.
+            nodes_redundant = active_num - group.count.max
+            for instance in group_active:
+                if nodes_redundant == 0:
+                    break
+                if instance.status == InstanceStatus.IDLE:
+                    instance.termination_reason = InstanceTerminationReason.MAX_INSTANCES_LIMIT
+                    instance.termination_reason_message = "Fleet has too many instances"
+                    switch_instance_status(session, instance, InstanceStatus.TERMINATING)
+                    nodes_redundant -= 1
+                    changed = True
+
+    return changed
 
 
 def _autodelete_fleet(session: AsyncSession, fleet_model: FleetModel) -> bool:
@@ -267,11 +283,7 @@ def _autodelete_fleet(session: AsyncSession, fleet_model: FleetModel) -> bool:
         return False
 
     fleet_spec = get_fleet_spec(fleet_model)
-    if (
-        fleet_model.status != FleetStatus.TERMINATING
-        and fleet_spec.configuration.nodes is not None
-        and fleet_spec.configuration.nodes.min == 0
-    ):
+    if fleet_model.status != FleetStatus.TERMINATING and _fleet_spec_allows_zero_min(fleet_spec):
         # Empty fleets that allow 0 nodes should not be auto-deleted
         return False
 

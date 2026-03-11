@@ -86,6 +86,12 @@ SUPPORTED_PLATFORMS = [
 ]
 
 
+def _is_cpu_instance(instance_offer: InstanceOffer) -> bool:
+    """True if the instance type is CPU (no InfiniBand/fabric support)."""
+    platform = instance_offer.instance.name.split()[0]
+    return platform.startswith("cpu-")
+
+
 class NebiusCompute(
     ComputeWithAllOffersCached,
     ComputeWithCreateInstanceSupport,
@@ -154,7 +160,10 @@ class NebiusCompute(
             backend_data = NebiusPlacementGroupBackendData.load(
                 placement_group.provisioning_data.backend_data
             )
-            if backend_data.cluster is not None:
+            # Only pass cluster_id for GPU instances. CPU instances need same
+            # AZ/region but cannot join a GPU cluster. Use instance type (not fabrics)
+            # to avoid misclassifying a GPU with missing fabric data.
+            if backend_data.cluster is not None and not _is_cpu_instance(instance_offer):
                 cluster_id = backend_data.cluster.id
 
         labels = {
@@ -333,6 +342,11 @@ class NebiusCompute(
         instance_offer_backend_data: NebiusOfferBackendData = (
             NebiusOfferBackendData.__response__.parse_obj(instance_offer.backend_data)
         )
+        # CPU instances need same region but not fabric. They are suitable for any PG
+        # in the region; cluster_id will not be used. Use instance type (not fabrics)
+        # to avoid misclassifying a GPU with missing fabric data.
+        if _is_cpu_instance(instance_offer):
+            return True
         return (
             placement_group_backend_data.cluster is None
             or placement_group_backend_data.cluster.fabric in instance_offer_backend_data.fabrics

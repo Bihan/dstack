@@ -26,6 +26,7 @@ from dstack._internal.core.models.fleets import (
     FleetSpec,
     FleetStatus,
     InstanceGroupPlacement,
+    NodeGroup,
     SSHHostParams,
     SSHParams,
 )
@@ -437,14 +438,18 @@ async def get_plan(
 
     offers = []
     if effective_spec.configuration.ssh_config is None:
-        offers_with_backends = await get_create_instance_offers(
-            project=project,
-            profile=effective_spec.merged_profile,
-            requirements=get_fleet_requirements(effective_spec),
-            fleet_spec=effective_spec,
-            blocks=effective_spec.configuration.blocks,
-        )
-        offers = [offer for _, offer in offers_with_backends]
+        # Collect offers per node group (each group may have different resources).
+        node_groups = effective_spec.configuration.node_groups
+        for group_idx in range(len(node_groups)):
+            group_spec = _get_node_group_spec(effective_spec, group_idx)
+            offers_with_backends = await get_create_instance_offers(
+                project=project,
+                profile=effective_spec.merged_profile,
+                requirements=get_fleet_requirements(group_spec),
+                fleet_spec=effective_spec,
+                blocks=effective_spec.configuration.blocks,
+            )
+            offers.extend(offer for _, offer in offers_with_backends)
 
     _remove_fleet_spec_sensitive_info(effective_spec)
     if current_fleet is not None:
@@ -645,7 +650,10 @@ def create_fleet_instance_model(
     spec: FleetSpec,
     instance_num: int,
     instance_id: Optional[uuid.UUID] = None,
+    node_group_index: int = 0,
 ) -> InstanceModel:
+    if node_group_index != 0 or len(spec.configuration.node_groups) > 1:
+        spec = _get_node_group_spec(spec, node_group_index)
     profile = spec.merged_profile
     requirements = get_fleet_requirements(spec)
     instance_model = instances_services.create_instance_model(
@@ -661,6 +669,7 @@ def create_fleet_instance_model(
         blocks=spec.configuration.blocks,
         tags=spec.configuration.tags,
     )
+    instance_model.node_group_index = node_group_index
     return instance_model
 
 
@@ -924,6 +933,31 @@ def get_fleet_requirements(fleet_spec: FleetSpec) -> Requirements:
     return requirements
 
 
+def _get_node_group_spec(fleet_spec: FleetSpec, group_idx: int) -> FleetSpec:
+    """
+    Build a FleetSpec for a specific node group.
+    Overrides configuration.resources and configuration.nodes from the group.
+    """
+    node_groups = fleet_spec.configuration.node_groups
+    if group_idx >= len(node_groups):
+        return fleet_spec
+
+    group: NodeGroup = node_groups[group_idx]
+    group_spec = copy_model(fleet_spec)
+    group_spec.configuration = copy_model(fleet_spec.configuration)
+    group_spec.configuration.nodes = group.count
+    group_spec.configuration.resources = group.resources or group_spec.configuration.resources
+    return group_spec
+
+
+def _fleet_spec_allows_zero_min(spec: FleetSpec) -> bool:
+    """True if the fleet allows 0 nodes (all groups have min 0)."""
+    node_groups = spec.configuration.node_groups
+    if not node_groups:
+        return False
+    return all(g.count.min == 0 for g in node_groups)
+
+
 def get_next_instance_num(taken_instance_nums: set[int]) -> int:
     if not taken_instance_nums:
         return 0
@@ -1043,28 +1077,33 @@ async def _create_fleet(
                 )
                 fleet_model.instances.append(instance_model)
         else:
-            for i in range(_get_fleet_nodes_to_provision(spec)):
-                instance_model = create_fleet_instance_model(
-                    session=session,
-                    project=project,
-                    username=user.name,
-                    spec=spec,
-                    instance_num=i,
-                )
-                events.emit(
-                    session,
-                    (
-                        "Instance created on fleet submission."
-                        f" Status: {instance_model.status.upper()}"
-                    ),
-                    # Set `SystemActor` for consistency with other places where cloud instances can be
-                    # created (fleet spec consolidation, job provisioning, etc). Think of the fleet as being
-                    # created by the user, while the cloud instance is created by the system to satisfy the
-                    # fleet spec.
-                    actor=events.SystemActor(),
-                    targets=[events.Target.from_model(instance_model)],
-                )
-                fleet_model.instances.append(instance_model)
+            taken_instance_nums: set[int] = set()
+            for group_idx, count in _get_fleet_nodes_to_provision_per_group(spec):
+                for _ in range(count):
+                    instance_num = get_next_instance_num(taken_instance_nums)
+                    instance_model = create_fleet_instance_model(
+                        session=session,
+                        project=project,
+                        username=user.name,
+                        spec=spec,
+                        instance_num=instance_num,
+                        node_group_index=group_idx,
+                    )
+                    events.emit(
+                        session,
+                        (
+                            "Instance created on fleet submission."
+                            f" Status: {instance_model.status.upper()}"
+                        ),
+                        # Set `SystemActor` for consistency with other places where cloud instances can be
+                        # created (fleet spec consolidation, job provisioning, etc). Think of the fleet as being
+                        # created by the user, while the cloud instance is created by the system to satisfy the
+                        # fleet spec.
+                        actor=events.SystemActor(),
+                        targets=[events.Target.from_model(instance_model)],
+                    )
+                    fleet_model.instances.append(instance_model)
+                    taken_instance_nums.add(instance_num)
         await session.commit()
         if spec.configuration.ssh_config is None:
             pipeline_hinter.hint_fetch(FleetModel.__name__)
@@ -1322,6 +1361,9 @@ def _validate_fleet_spec_and_set_defaults(spec: FleetSpec):
 def _set_fleet_spec_defaults(spec: FleetSpec):
     if spec.configuration.resources is not None:
         set_resources_defaults(spec.configuration.resources)
+    for group in spec.configuration.node_groups:
+        if group.resources is not None:
+            set_resources_defaults(group.resources)
 
 
 def _validate_all_ssh_params_specified(ssh_config: SSHParams):
@@ -1364,7 +1406,60 @@ def _validate_internal_ips(ssh_config: SSHParams):
 def _get_fleet_nodes_to_provision(spec: FleetSpec) -> int:
     if spec.configuration.nodes is None:
         return 0
+    if isinstance(spec.configuration.nodes, list):
+        return sum(g.count.target for g in spec.configuration.nodes)
     return spec.configuration.nodes.target
+
+
+def iter_node_groups_in_creation_order(fleet_spec: FleetSpec):
+    """
+    Yields (group_idx, group) for consolidation. For placement: cluster, GPU groups first.
+
+    The first instance (instance_num 0) becomes the cluster master and creates the placement
+    group. On Nebius and similar backends, only GPU/IB-capable instances can create a
+    proper cluster with fabric; a CPU master would create a dummy PG and GPU instances
+    would lack fast interconnect. Sorting GPU groups first ensures instance 0 is GPU.
+    """
+    node_groups = fleet_spec.configuration.node_groups
+    config = fleet_spec.configuration
+    if config.placement == InstanceGroupPlacement.CLUSTER and config.ssh_config is None:
+        order = sorted(
+            range(len(node_groups)),
+            key=lambda i: (not _node_group_has_gpus(node_groups[i], config), i),
+        )
+    else:
+        order = range(len(node_groups))
+    for group_idx in order:
+        yield group_idx, node_groups[group_idx]
+
+
+def _node_group_has_gpus(group: NodeGroup, config: FleetConfiguration) -> bool:
+    """True if the group requires GPUs (for creation order: GPU groups first in cluster fleets)."""
+    res = group.resources or config.resources
+    if res is None or res.gpu is None:
+        return False
+    return (res.gpu.count.min or 0) > 0 or res.gpu.name is not None
+
+
+def _get_fleet_nodes_to_provision_per_group(spec: FleetSpec) -> List[Tuple[int, int]]:
+    """
+    Returns [(group_idx, count), ...] for instances to provision at fleet creation.
+    For placement: cluster, GPU groups come first so the master creates a proper cluster.
+    """
+    node_groups = spec.configuration.node_groups
+    config = spec.configuration
+    if not node_groups:
+        total = _get_fleet_nodes_to_provision(spec)
+        return [(0, total)] if total > 0 else []
+    items = [
+        (group_idx, group.count.target)
+        for group_idx, group in enumerate(node_groups)
+        if group.count.target > 0
+    ]
+    if config.placement == InstanceGroupPlacement.CLUSTER and config.ssh_config is None:
+        # GPU groups first so instance 0 is GPU and creates the placement group with fabric.
+        items.sort(key=lambda x: (not _node_group_has_gpus(node_groups[x[0]], config), x[0]))
+    return items
 
 
 def _terminate_fleet_instances(

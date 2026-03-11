@@ -41,12 +41,14 @@ from dstack._internal.server.models import (
 )
 from dstack._internal.server.services import events
 from dstack._internal.server.services.fleets import (
+    _fleet_spec_allows_zero_min,
     create_fleet_instance_model,
     emit_fleet_status_change_event,
     get_fleet_spec,
     get_next_instance_num,
     is_fleet_empty,
     is_fleet_in_use,
+    iter_node_groups_in_creation_order,
 )
 from dstack._internal.server.services.locking import get_locker
 from dstack._internal.server.utils import sentry_utils
@@ -408,6 +410,7 @@ class _ProcessResult:
 class _NewInstanceCreate(TypedDict):
     id: uuid.UUID
     instance_num: int
+    node_group_index: int
 
 
 @dataclass
@@ -505,10 +508,11 @@ def _maintain_fleet_nodes_in_min_max_range(
     fleet_spec: FleetSpec,
 ) -> _MaintainNodesResult:
     """
-    Ensures the fleet has at least `nodes.min` and at most `nodes.max` instances.
+    Ensures the fleet has at least nodes.min and at most nodes.max instances per node group.
     """
     assert fleet_spec.configuration.nodes is not None
     result = _MaintainNodesResult()
+
     for instance in instances:
         # Delete terminated but not deleted instances since
         # they are going to be replaced with new pending instances.
@@ -518,41 +522,44 @@ def _maintain_fleet_nodes_in_min_max_range(
                 "deleted": True,
                 "deleted_at": NOW_PLACEHOLDER,
             }
-    active_instances = [
-        i for i in instances if i.status != InstanceStatus.TERMINATED and not i.deleted
-    ]
-    active_instances_num = len(active_instances)
-    if active_instances_num < fleet_spec.configuration.nodes.min:
-        result.changes_required = True
-        nodes_missing = fleet_spec.configuration.nodes.min - active_instances_num
-        taken_instance_nums = {instance.instance_num for instance in active_instances}
-        for _ in range(nodes_missing):
-            instance_num = get_next_instance_num(taken_instance_nums)
-            taken_instance_nums.add(instance_num)
-            result.new_instance_creates.append(
-                _NewInstanceCreate(id=uuid.uuid4(), instance_num=instance_num)
-            )
-        return result
-    if (
-        fleet_spec.configuration.nodes.max is None
-        or active_instances_num <= fleet_spec.configuration.nodes.max
-    ):
-        return result
-    # Fleet has more instances than allowed by nodes.max.
-    # This is possible due to race conditions (e.g. provisioning jobs in a fleet concurrently)
-    # or if nodes.max is updated.
-    result.changes_required = True
-    nodes_redundant = active_instances_num - fleet_spec.configuration.nodes.max
-    for instance in instances:
-        if nodes_redundant == 0:
-            break
-        if instance.status == InstanceStatus.IDLE:
-            result.instance_id_to_update_map[instance.id] = {
-                "termination_reason": InstanceTerminationReason.MAX_INSTANCES_LIMIT,
-                "termination_reason_message": "Fleet has too many instances",
-                "status": InstanceStatus.TERMINATING,
-            }
-            nodes_redundant -= 1
+
+    all_active = [i for i in instances if i.status != InstanceStatus.TERMINATED and not i.deleted]
+    taken_instance_nums = {i.instance_num for i in all_active}
+
+    for group_idx, group in iter_node_groups_in_creation_order(fleet_spec):
+        group_active = [i for i in all_active if i.node_group_index == group_idx]
+        active_num = len(group_active)
+
+        if active_num < group.count.min:
+            result.changes_required = True
+            nodes_missing = group.count.min - active_num
+            for _ in range(nodes_missing):
+                instance_num = get_next_instance_num(taken_instance_nums)
+                taken_instance_nums.add(instance_num)
+                result.new_instance_creates.append(
+                    _NewInstanceCreate(
+                        id=uuid.uuid4(),
+                        instance_num=instance_num,
+                        node_group_index=group_idx,
+                    )
+                )
+        elif group.count.max is not None and active_num > group.count.max:
+            # Fleet has more instances than allowed by nodes.max.
+            # This is possible due to race conditions (e.g. provisioning jobs in a fleet concurrently)
+            # or if nodes.max is updated.
+            result.changes_required = True
+            nodes_redundant = active_num - group.count.max
+            for instance in group_active:
+                if nodes_redundant == 0:
+                    break
+                if instance.status == InstanceStatus.IDLE:
+                    result.instance_id_to_update_map[instance.id] = {
+                        "termination_reason": InstanceTerminationReason.MAX_INSTANCES_LIMIT,
+                        "termination_reason_message": "Fleet has too many instances",
+                        "status": InstanceStatus.TERMINATING,
+                    }
+                    nodes_redundant -= 1
+
     return result
 
 
@@ -568,11 +575,7 @@ def _should_delete_fleet(fleet_model: FleetModel) -> bool:
 
     # TODO: Drop non-terminating fleets auto-deletion after dropping fleets auto-creation.
     fleet_spec = get_fleet_spec(fleet_model)
-    if (
-        fleet_model.status != FleetStatus.TERMINATING
-        and fleet_spec.configuration.nodes is not None
-        and fleet_spec.configuration.nodes.min == 0
-    ):
+    if fleet_model.status != FleetStatus.TERMINATING and _fleet_spec_allows_zero_min(fleet_spec):
         # Empty fleets that allow 0 nodes should not be auto-deleted
         return False
 
@@ -633,6 +636,7 @@ async def _create_missing_fleet_instances(
             spec=fleet_spec,
             instance_num=new_instance_create["instance_num"],
             instance_id=new_instance_create["id"],
+            node_group_index=new_instance_create.get("node_group_index", 0),
         )
         instance_model.fleet_id = fleet_model.id
         events.emit(
@@ -664,7 +668,7 @@ def _set_fail_instances_on_master_bootstrap_failure(
     if (
         not _is_cloud_cluster_fleet_spec(fleet_spec)
         or fleet_spec.configuration.nodes is None
-        or fleet_spec.configuration.nodes.min != 0
+        or not _fleet_spec_allows_zero_min(fleet_spec)
         or fleet_model.current_master_instance_id is None
     ):
         return

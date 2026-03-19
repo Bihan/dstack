@@ -2,7 +2,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import httpx
 import psutil
@@ -323,3 +323,130 @@ class SglangRouter(Router):
         except Exception:
             logger.exception("Error removing worker %s", worker_url)
             return False
+
+
+# ---------------------------------------------------------------------------
+# Async API for server scheduled task (connects to router via SSH tunnel)
+# ---------------------------------------------------------------------------
+
+ROUTER_BASE_URL = "http://dstack"
+
+
+async def update_workers_in_router_replica(
+    client: Union[httpx.AsyncClient, object],
+    target_workers: List[dict],
+) -> None:
+    """
+    Sync workers with an SGLang router. Compares router's registered workers
+    (GET /workers) with target_workers from our replicas. Adds missing, removes extras.
+
+    target_workers: List of dicts with url, worker_type (optional), bootstrap_port (optional).
+    """
+    current_workers = await _async_get_router_workers(client)
+    # Normalize URLs by removing trailing slashes for consistent comparison.
+    current_worker_urls: set[str] = set()
+    # Map URL -> worker_id for removals. DELETE /workers/{id} requires the router-assigned id;
+    url_to_worker_id: dict[str, str] = {}
+    for w in current_workers:
+        u = w.get("url")
+        if u and isinstance(u, str):
+            norm = u.rstrip("/")
+            current_worker_urls.add(norm)
+            worker_id = w.get("id")
+            if worker_id and isinstance(worker_id, str):
+                url_to_worker_id[norm] = worker_id
+
+    # Map URL -> full payload (url, worker_type, bootstrap_port) for additions.
+    target_payload_by_url: dict[str, dict] = {}
+    for w in target_workers:
+        u = w.get("url")
+        if u and isinstance(u, str):
+            target_payload_by_url[u.rstrip("/")] = w
+
+    target_urls = set(target_payload_by_url.keys())
+    to_add = target_urls - current_worker_urls
+    to_remove = current_worker_urls - target_urls
+
+    if to_add:
+        logger.info("SGLang router sync: adding %d workers", len(to_add))
+    if to_remove:
+        logger.info("SGLang router sync: removing %d workers", len(to_remove))
+
+    for url in to_add:
+        payload = target_payload_by_url.get(url, {})
+        if not await _async_add_worker(client, payload):
+            logger.warning("Failed to add worker %s, continuing", url)
+
+    for url in to_remove:
+        worker_id = url_to_worker_id.get(url)
+        if not worker_id:
+            logger.warning("No worker id found for url %s, skipping remove", url)
+            continue
+        if not await _async_remove_worker(client, worker_id, url):
+            logger.warning("Failed to remove worker %s, continuing", url)
+
+
+async def _async_get_router_workers(client: Union[httpx.AsyncClient, object]) -> List[dict]:
+    """Fetch current workers from router via async HTTP client (e.g. SSH tunnel)."""
+    try:
+        resp = await client.get(f"{ROUTER_BASE_URL}/workers", timeout=5.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("workers", [])
+    except Exception:
+        logger.exception("Error getting SGLang router workers")
+    return []
+
+
+async def _async_add_worker(
+    client: Union[httpx.AsyncClient, object],
+    payload: dict,
+) -> bool:
+    """Add worker to router via async HTTP client."""
+    url = payload.get("url")
+    if not url:
+        return False
+    worker_type = payload.get("worker_type", "regular")
+    bootstrap_port = payload.get("bootstrap_port")
+    post_payload: dict = {"url": url, "worker_type": worker_type}
+    if bootstrap_port is not None:
+        post_payload["bootstrap_port"] = bootstrap_port
+    try:
+        resp = await client.post(
+            f"{ROUTER_BASE_URL}/workers",
+            json=post_payload,
+            timeout=30.0,
+        )
+        if resp.status_code == 202:
+            data = resp.json()
+            if data.get("status") == "accepted":
+                logger.info("Worker %s (type=%s) accepted by SGLang router", url, worker_type)
+                return True
+        logger.warning("Failed to add worker %s: status %d %s", url, resp.status_code, resp.text)
+    except Exception:
+        logger.exception("Error adding worker %s", url)
+    return False
+
+
+async def _async_remove_worker(
+    client: Union[httpx.AsyncClient, object],
+    worker_id: str,
+    worker_url: str,
+) -> bool:
+    """Remove worker from router via async HTTP client."""
+    try:
+        resp = await client.delete(
+            f"{ROUTER_BASE_URL}/workers/{worker_id}",
+            timeout=5.0,
+        )
+        if resp.status_code == 202:
+            data = resp.json()
+            if data.get("status") == "accepted":
+                logger.info("Removed worker %s from SGLang router", worker_url)
+                return True
+        logger.warning(
+            "Failed to remove worker %s: status %d %s", worker_url, resp.status_code, resp.text
+        )
+    except Exception:
+        logger.exception("Error removing worker %s", worker_url)
+    return False

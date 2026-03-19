@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
 from typing import List, Optional, Union
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import (
     contains_eager,
@@ -642,16 +642,29 @@ async def _assign_job_to_fleet_instance(
         return None
 
     instances_with_offers.sort(key=lambda instance_with_offer: instance_with_offer[0].price or 0)
-    instance, offer = instances_with_offers[0]
-    # Reload InstanceModel with volume attachments
-    res = await session.execute(
-        select(InstanceModel)
-        .where(InstanceModel.id == instance.id)
-        .options(joinedload(InstanceModel.volume_attachments))
-    )
-    instance = res.unique().scalar_one()
-    switch_instance_status(session, instance, InstanceStatus.BUSY)
-    instance.busy_blocks += offer.blocks
+
+    for instance, offer in instances_with_offers:
+        # Atomic conditional update: only assign if instance has capacity
+        total_expr = func.coalesce(InstanceModel.total_blocks, 1)
+        result = await session.execute(
+            update(InstanceModel)
+            .where(InstanceModel.id == instance.id)
+            .where(total_expr - InstanceModel.busy_blocks >= offer.blocks)
+            .values(busy_blocks=InstanceModel.busy_blocks + offer.blocks)
+            .execution_options(synchronize_session="fetch")
+        )
+        if result.rowcount == 0:
+            continue  # No capacity or concurrent assignment, try next instance
+        res = await session.execute(
+            select(InstanceModel)
+            .where(InstanceModel.id == instance.id)
+            .options(joinedload(InstanceModel.volume_attachments))
+        )
+        instance = res.unique().scalar_one()
+        switch_instance_status(session, instance, InstanceStatus.BUSY)
+        break
+    else:
+        return None  # No instance had capacity
 
     job_model.instance = instance
     job_model.used_instance_id = instance.id

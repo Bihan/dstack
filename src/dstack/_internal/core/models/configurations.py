@@ -800,6 +800,16 @@ class ReplicaGroup(CoreModel):
         Field(description="The shell commands to run for replicas in this group"),
     ] = []
 
+    router: Annotated[
+        Optional[AnyServiceRouterConfig],
+        Field(
+            description=(
+                "Router configuration for replicas in this group. When set, this group acts as "
+                "a router (e.g. for PD disaggregation). The /workers POST is sent only to router groups."
+            )
+        ),
+    ] = None
+
     @validator("name")
     def validate_name(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
@@ -967,6 +977,13 @@ class ServiceConfigurationParams(CoreModel):
                 raise ValueError(
                     f"Duplicate replica group names found: {duplicates}. "
                     "Each replica group must have a unique name."
+                )
+
+            # At most one replica group may have a router (PD disaggregation).
+            router_groups = [g for g in v if g.router is not None]
+            if len(router_groups) > 1:
+                raise ValueError(
+                    "At most one replica group may have a router. Found router in multiple groups."
                 )
         return v
 

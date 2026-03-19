@@ -32,6 +32,9 @@ from dstack._internal.server.background.scheduled_tasks.prometheus_metrics impor
     collect_prometheus_metrics,
     delete_prometheus_metrics,
 )
+from dstack._internal.server.background.scheduled_tasks.replica import (
+    process_all_replicas_registered,
+)
 from dstack._internal.server.background.scheduled_tasks.running_jobs import (
     process_running_jobs,
 )
@@ -92,6 +95,11 @@ def start_scheduled_tasks() -> AsyncIOScheduler:
     # The jitter is needed to give all tasks a chance to acquire locks.
 
     _scheduler.add_job(process_probes, IntervalTrigger(seconds=3, jitter=1))
+    _scheduler.add_job(
+        process_all_replicas_registered,
+        IntervalTrigger(seconds=5, jitter=2),
+        max_instances=1,
+    )
     _scheduler.add_job(collect_metrics, IntervalTrigger(seconds=10), max_instances=1)
     _scheduler.add_job(delete_metrics, IntervalTrigger(minutes=5), max_instances=1)
     _scheduler.add_job(delete_events, IntervalTrigger(minutes=7), max_instances=1)
